@@ -115,3 +115,52 @@ The JSON has the same information plus everything the Markdown leaves out.
   difference shows up as attack values that drift steadily in one direction.
 - **Level** compares RMS over each detected note. Reverb, room noise and
   sample release tails all affect it.
+
+
+## Audio-to-score review workflow
+
+Use this workflow with any piece or genre. The current pitch detector expects
+one sounding note at a time, so use a solo performance or an isolated melody
+or instrument part when the source has overlapping notes. Ensure the reference
+and Dorico render contain the same musical passage.
+
+1. Make an audio-only draft in a separate Dorico project. The optional MIDI
+   export can supply initial note events for import.
+2. Export the same short passage as a new WAV. Compare the two files and
+   check the measured levels. Use the loudness-matched listening copies for
+   A/B review.
+3. Review ambiguous events in musical order in the JSON. Check the detected
+   pitches and attacks against the audio and locate the notes in Dorico
+   before treating an unmatched event as a written-note error.
+4. Make a supported correction in a new project version. Export another WAV
+   and rerun the same passage. Keep earlier drafts and reports for comparison.
+5. Keep the raw F1 for comparison. Systematic tuning and tempo drift can
+   suppress it. Separate pitch, timing, and level when deciding what to change.
+
+### Example: Bach Sarabande
+
+The opening (roughly 13 seconds) of Alex Murray's solo traverso recording was
+compared with a Dorico WAV rendered from a separate audio-only draft. The
+baseline run needed +31.7 dB for RMS matching and scored 0.09 F1. A rerun on
+the loudness-matched copy needed only +0.3 dB more for RMS matching, with
+the same F1. Comparing the original to itself gave 1.00 F1, a consistency
+check on identical input.
+
+The old alignment paired events over two octaves apart. Its pitch cost
+was capped, so such a pair could be cheaper than two gaps. The current
+alignment excludes pairs more than three semitones apart. That threshold
+is a guardrail. It does not establish which nearby pairs are correct.
+
+One reference event around 1.35 seconds was unmatched even though its
+pitch was already in the draft notation. Use the report to locate the
+passage, then check the detection, the render, and the written note before
+changing the score.
+
+[Recording: Alex Murray, CC BY-SA 2.0](https://commons.wikimedia.org/wiki/File:Bach_-_Partita_For_Solo_Flute_-_Traverso_-_3._Sarabande.ogg)
+
+With that guardrail, the same excerpt produced 13 paired events, down from
+16, with three implausible pairs left unmatched on both sides. The strict
+note-match F1 stayed at 0.09.
+
+This example verified the level correction. A report-driven score correction
+followed by a fresh Dorico render remains to be validated.

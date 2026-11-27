@@ -73,7 +73,8 @@ outputs.
   rather than trusted.
 - **`align`** is an edit-distance dynamic program. A pair is free within 35
   cents, rising to a cost of 1.75, plus up to 0.35 for a duration ratio.
-  Skipping a note costs 1. Unmatched notes become `None` on one side.
+  Pairs more than 300 cents apart are excluded. Skipping a note costs 1.
+  Unmatched notes become `None` on one side.
 - **`compare`** reports all deltas as *render minus reference*. Timing subtracts
   one constant offset, taken from the first aligned pair within 60 cents.
   Levels add the gain that matches the two clips' overall RMS. The `review`
@@ -113,5 +114,5 @@ outputs.
   Python 3.12 and 3.14. `.github/workflows/docs.yml` builds the docs on every
   PR and deploys to GitHub Pages (https://andyw98.github.io/music-ai/) on
   pushes to `main`.
-- Validation on real Dorico exports is still pending. So far, results have
-  only been verified on synthetic tones.
+- The Sarabande case study in [the report guide](docs/report.md) describes the
+  real-audio check and its remaining limitations.

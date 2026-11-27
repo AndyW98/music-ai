@@ -53,10 +53,10 @@ distance:
 - Pairing two notes is free if their pitches are within 35 cents. The cost
   then rises by 1 per 100 cents, up to 1.75. A difference in duration adds up
   to 0.35.
-- Leaving a note unmatched on either side costs 1.
+- A pair more than 300 cents apart is excluded. Leaving a note unmatched on either side costs 1.
 
-So a wrong or missing note shows up as an unmatched or extra event, and the
-notes that follow it stay in sync. Audio is never stretched.
+The report describes detected events. A missed detection, an ornament, or a written
+note error can all produce an unmatched event. Audio is never stretched.
 
 ## 6. Measuring
 
