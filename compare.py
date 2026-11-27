@@ -1,6 +1,7 @@
 """Compare a solo recording with a notation render.
 
-Pipeline, for each of the two WAV files:
+Pipeline, for each of the two audio files (WAV, FLAC, OGG and other formats
+that libsndfile reads):
 
 1. ``read_audio`` loads the file and scales it to floating point full scale.
 2. ``track`` estimates pitch every 10 ms with a YIN-style difference function.
@@ -8,10 +9,12 @@ Pipeline, for each of the two WAV files:
 4. ``analyze`` wraps steps 1-3 and caches the result by file content and range.
 
 The two note lists are then paired by ``align`` (an edit-distance alignment
-that tolerates missing and extra notes), measured by ``compare``, and written
-as ``comparison.json`` plus a short ``comparison.md`` by ``main``.
+that tolerates missing and extra notes), measured by ``compare`` and scored
+with mir_eval's note-matching metrics. ``main`` writes ``comparison.json``,
+a short ``comparison.md``, level-matched listening copies and, on request, a
+MIDI file of the reference notes.
 
-Input files are only ever opened for reading.
+Input files are only ever opened for reading. Every output is a new file.
 """
 
 import argparse
@@ -21,9 +24,26 @@ import json
 from pathlib import Path
 import tempfile
 
+import mir_eval
 import numpy as np
+import pretty_midi
+import pyloudnorm
 from scipy import signal
-from scipy.io import wavfile
+import soundfile
+
+# Bump when ``read_audio``, ``track``, ``segment`` or the cached data changes,
+# so that stale cache entries are never reused.
+CACHE_VERSION = "v2"
+
+# mir_eval note matching: onsets within 50 ms and pitch within 50 cents count
+# as the same note. The offset score also needs the note end within 20% of the
+# reference duration (or 50 ms, whichever is larger).
+ONSET_TOLERANCE_S = .05
+PITCH_TOLERANCE_CENTS = 50.
+OFFSET_RATIO = .2
+
+# General MIDI program for --midi (0-based; 73 is "Flute").
+DEFAULT_MIDI_PROGRAM = 73
 
 
 @dataclass
@@ -46,19 +66,16 @@ class Note:
 def read_audio(path):
     """Return ``(sample_rate, samples)`` with samples scaled to about -1..1.
 
-    Unsigned 8-bit, signed integer, and floating-point WAV files are
-    supported. Multichannel audio keeps its channel axis; ``analyze`` mixes it
-    to mono later.
+    Uses soundfile (libsndfile), so WAV in any PCM or float format, FLAC and
+    OGG Vorbis all work. Integer PCM is scaled by the magnitude of its most
+    negative value (e.g. 32768 for 16-bit). Multichannel audio keeps its
+    channel axis; ``analyze`` mixes it to mono later.
     """
-    rate, raw = wavfile.read(path)
-    if raw.dtype.kind == "u":
-        # 8-bit WAV is unsigned with silence at 128.
-        samples = (raw.astype(float) - 128) / 128
-    elif raw.dtype.kind == "i":
-        # Divide by the magnitude of the most negative value (e.g. 32768).
-        samples = raw.astype(float) / -float(np.iinfo(raw.dtype).min)
-    else:
-        samples = raw.astype(float)
+    try:
+        samples, rate = soundfile.read(path, dtype="float64")
+    except soundfile.SoundFileError as error:
+        # libsndfile errors are RuntimeErrors; report them like bad input.
+        raise ValueError(f"Cannot read audio in {path}: {error}") from error
     if not samples.size or not np.all(np.isfinite(samples)):
         raise ValueError(f"Empty or invalid audio in {path}")
     return rate, samples
@@ -141,12 +158,12 @@ def segment(frames, hop, stop):
 def analyze(path, start, end, cache):
     """Analyse ``path`` between ``start`` and ``end`` seconds, using the cache.
 
-    The cache key is a SHA-256 of an analysis version tag, the requested range
+    The cache key is a SHA-256 of ``CACHE_VERSION``, the requested range
     and the file's bytes, so renaming a file still hits the cache while
     editing it or changing the range does not. Returns ``(data, cache_hit)``.
     ``end=None`` means the end of the file.
     """
-    key = hashlib.sha256(f"v1:{start}:{end}".encode())
+    key = hashlib.sha256(f"{CACHE_VERSION}:{start}:{end}".encode())
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             key.update(block)
@@ -255,7 +272,105 @@ def compare(reference, rendered):
                        review=repeated or abs(cents) >= 60 or min(a.confidence, b.confidence) < .85)
         rows.append(row)
     return {"render_minus_reference_offset_s": shift, "render_gain_for_rms_match_db": gain,
-            "events": rows}
+            "note_match": note_scores(original, render, shift or 0.), "events": rows}
+
+
+def note_scores(original, render, shift):
+    """Score the render's notes against the reference with mir_eval.
+
+    The render is shifted back by ``shift`` seconds first, so a constant
+    lead-in difference is not counted as a timing error. Returns precision,
+    recall and F1 for onset+pitch matching, and again with offsets required.
+    These are the standard note-transcription metrics, useful for checking
+    that a new draft is better overall than the previous one.
+    """
+    def arrays(notes, offset):
+        intervals = np.array([[n.start - offset, n.end - offset] for n in notes])
+        hertz = 440. * 2 ** ((np.array([n.pitch for n in notes]) - 69) / 12)
+        return intervals, hertz
+
+    scores = {}
+    for name, ratio in (("onset_pitch", None), ("onset_pitch_offset", OFFSET_RATIO)):
+        if not original or not render:
+            # Nothing can match; mir_eval rejects empty interval arrays.
+            scores[name] = {"precision": 0., "recall": 0., "f1": 0.}
+            continue
+        ref_intervals, ref_hz = arrays(original, 0.)
+        est_intervals, est_hz = arrays(render, shift)
+        precision, recall, f1, _ = mir_eval.transcription.precision_recall_f1_overlap(
+            ref_intervals, ref_hz, est_intervals, est_hz, onset_tolerance=ONSET_TOLERANCE_S,
+            pitch_tolerance=PITCH_TOLERANCE_CENTS, offset_ratio=ratio)
+        scores[name] = {"precision": float(precision), "recall": float(recall), "f1": float(f1)}
+    scores["tolerances"] = {"onset_s": ONSET_TOLERANCE_S, "pitch_cents": PITCH_TOLERANCE_CENTS,
+                            "offset_ratio": OFFSET_RATIO, "render_shift_s": shift}
+    return scores
+
+
+def loudness(samples, rate):
+    """Integrated loudness in LUFS (ITU-R BS.1770), or None if unmeasurable.
+
+    BS.1770 needs at least 0.4 s of audio and returns -inf for near silence.
+    """
+    try:
+        value = pyloudnorm.Meter(rate).integrated_loudness(samples)
+    except ValueError:
+        return None
+    return float(value) if np.isfinite(value) else None
+
+
+def listening_copies(folder, reference_path, reference_range, render_path, render_range,
+                     rms_gain_db):
+    """Write the two selected ranges as new WAVs for A/B listening.
+
+    ``reference-clip.wav`` is the reference range unchanged.
+    ``render-level-matched.wav`` is the render range with one gain applied so
+    its integrated loudness (LUFS) matches the reference. If loudness cannot
+    be measured (clip under 0.4 s or near silence) the overall RMS gain is
+    used instead. Both are 32-bit float, so a gain above 0 dB cannot clip in
+    the file; the reported peak shows whether playback could. Returns details
+    for the report.
+    """
+    clips = {}
+    for label, path, (start, stop) in (("reference", reference_path, reference_range),
+                                       ("render", render_path, render_range)):
+        rate, samples = read_audio(path)
+        clips[label] = (rate, samples[round(start * rate):round(stop * rate)])
+    ref_lufs = loudness(clips["reference"][1], clips["reference"][0])
+    ren_lufs = loudness(clips["render"][1], clips["render"][0])
+    if ref_lufs is not None and ren_lufs is not None:
+        method, gain_db = "LUFS", ref_lufs - ren_lufs
+    else:
+        method, gain_db = "RMS", rms_gain_db
+    rate, render = clips["render"]
+    matched = render * 10 ** (gain_db / 20)
+    soundfile.write(folder / "reference-clip.wav", clips["reference"][1], clips["reference"][0],
+                    subtype="FLOAT")
+    soundfile.write(folder / "render-level-matched.wav", matched, rate, subtype="FLOAT")
+    return {"files": ["reference-clip.wav", "render-level-matched.wav"], "method": method,
+            "gain_db": float(gain_db), "reference_lufs": ref_lufs, "render_lufs": ren_lufs,
+            "matched_peak": float(np.max(np.abs(matched)))}
+
+
+def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM):
+    """Write detected notes as a single-track MIDI file for importing into Dorico.
+
+    Times are seconds from the start of the selected range at the MIDI default
+    tempo (120 bpm), so the rhythm still needs quantizing in the notation
+    program. Pitches are rounded to the nearest semitone (the exact cents are
+    in comparison.json). Velocity follows each note's level relative to the
+    loudest note: 100 at the loudest, 2 velocity steps per dB, minimum 20.
+    """
+    loudest = max(n["rms"] for n in notes)
+    midi = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=program)
+    for n in notes:
+        db = 20 * np.log10(max(n["rms"], 1e-12) / loudest)
+        velocity = int(np.clip(round(100 + 2 * db), 20, 127))
+        instrument.notes.append(pretty_midi.Note(
+            velocity=velocity, pitch=int(np.clip(round(n["pitch"]), 0, 127)),
+            start=max(0., n["start"] - range_start), end=max(0., n["end"] - range_start)))
+    midi.instruments.append(instrument)
+    midi.write(str(path))
 
 
 def markdown(result, limit):
@@ -280,6 +395,17 @@ def markdown(result, limit):
     for label in ("reference", "render"):
         level = result[label]
         lines.append(f"- {label.capitalize()} peak/RMS: {level['peak']:.4f} / {level['rms']:.4f} (full scale)")
+    match = result["note_match"]
+    lines.append(f"- Note match F1 (mir_eval, ±{ONSET_TOLERANCE_S * 1000:.0f} ms, "
+                 f"±{PITCH_TOLERANCE_CENTS:.0f} cents): {match['onset_pitch']['f1']:.2f}; "
+                 f"with note ends: {match['onset_pitch_offset']['f1']:.2f}")
+    copies = result.get("listening")
+    if copies:
+        lines.append(f"- Listening copies: {', '.join(copies['files'])} "
+                     f"(render gain {copies['gain_db']:+.1f} dB by {copies['method']}, "
+                     f"peak {copies['matched_peak']:.2f})")
+    if result.get("midi"):
+        lines.append(f"- Reference notes as MIDI: {result['midi']}")
     lines.extend(["", "| Reference s | Render s | Pitch cents | Attack ms | Duration ms | Level dB | Status |",
                   "|--:|--:|--:|--:|--:|--:|:--|"])
     for row in sorted(result["events"], key=priority, reverse=True)[:limit]:
@@ -307,6 +433,12 @@ def main():
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--cache", type=Path, default=Path("work/cache"))
     parser.add_argument("--output", type=Path, default=Path("outputs"))
+    parser.add_argument("--no-listening-copy", action="store_true",
+                        help="skip writing reference-clip.wav and render-level-matched.wav")
+    parser.add_argument("--midi", action="store_true",
+                        help="also write the reference's detected notes as reference-notes.mid")
+    parser.add_argument("--midi-program", type=int, default=DEFAULT_MIDI_PROGRAM,
+                        help="General MIDI program for --midi, 0-127 (default: 73, Flute)")
     args = parser.parse_args()
     try:
         for start, end in ((args.reference_start, args.reference_end), (args.render_start, args.render_end)):
@@ -314,6 +446,8 @@ def main():
                 raise ValueError("Ranges require finite seconds with 0 <= start < end")
         if args.limit < 1:
             raise ValueError("--limit must be positive")
+        if not 0 <= args.midi_program <= 127:
+            raise ValueError("--midi-program must be between 0 and 127")
         reference, hit = analyze(args.reference, args.reference_start, args.reference_end, args.cache)
         rendered, _ = analyze(args.render, args.render_start, args.render_end, args.cache)
         result = compare(reference, rendered)
@@ -323,6 +457,14 @@ def main():
         args.output.mkdir(parents=True, exist_ok=True)
         # mkdtemp gives every run its own uniquely named folder.
         folder = Path(tempfile.mkdtemp(prefix="comparison-", dir=args.output))
+        if not args.no_listening_copy:
+            result["listening"] = listening_copies(
+                folder, args.reference, reference["range"], args.render, rendered["range"],
+                result["render_gain_for_rms_match_db"])
+        if args.midi:
+            write_midi(folder / "reference-notes.mid", reference["notes"], reference["range"][0],
+                       args.midi_program)
+            result["midi"] = "reference-notes.mid"
         (folder / "comparison.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
         (folder / "comparison.md").write_text(markdown(result, args.limit), encoding="utf-8")
         print(folder / "comparison.md")

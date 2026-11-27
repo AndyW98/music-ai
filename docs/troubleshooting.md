@@ -10,12 +10,14 @@ All errors start with `Comparison failed:` and exit with status 2.
 | `Range starts outside <file>` | The start time is past the end of that file. |
 | `Selected range is silent or shorter than 40 ms` | Pick a longer range, or check that the export is not silent. |
 | `No stable solo notes detected in <file>` | The range has no notes the tracker can follow. See *Limitations*. |
-| `Empty or invalid audio in <file>` | The WAV has no samples or contains invalid values. Export it again. |
+| `Empty or invalid audio in <file>` | The file has no samples or contains invalid values. Export it again. |
+| `Cannot read audio in <file>: …` | The file is not a format libsndfile can read (for example MP3, or a damaged file). Export as WAV or FLAC. |
+| `--midi-program must be between 0 and 127` | Use a General MIDI program number from 0 to 127. |
 | `--limit must be positive` | Use `--limit 1` or more. |
 | File or permission errors | Check the path. In PowerShell, put quotes around paths that contain spaces. |
 
-Other WAV formats, such as compressed WAV, may fail to load. Export as PCM or
-32-bit float.
+Supported formats are those libsndfile reads, including WAV, FLAC and OGG
+Vorbis. MP3 is not supported, so convert it to WAV or FLAC first.
 
 ## Results look wrong
 

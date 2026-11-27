@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pretty_midi
+import pyloudnorm
 import pytest
 from scipy.io import wavfile
+import soundfile
 
 import compare
 from compare import Note
@@ -71,6 +74,20 @@ class TestReadAudio:
         path = tmp_path / "a.wav"
         wavfile.write(path, 8000, np.zeros((10, 2), dtype=np.int16))
         assert compare.read_audio(path)[1].shape == (10, 2)
+
+    @pytest.mark.parametrize("suffix", [".flac", ".ogg"])
+    def test_flac_and_ogg_are_read(self, tmp_path, suffix):
+        path = tmp_path / f"a{suffix}"
+        soundfile.write(path, tone(440), sa.RATE)
+        rate, samples = compare.read_audio(path)
+        assert rate == sa.RATE and samples.shape == (int(.5 * sa.RATE),)
+        assert np.max(np.abs(samples - tone(440))) < .05  # Vorbis is lossy
+
+    def test_unreadable_file_is_a_value_error(self, tmp_path):
+        path = tmp_path / "bad.wav"
+        path.write_bytes(b"not audio")
+        with pytest.raises(ValueError, match="Cannot read audio"):
+            compare.read_audio(path)
 
     @pytest.mark.parametrize("data", [np.array([0., np.nan], dtype=np.float32),
                                       np.array([np.inf], dtype=np.float32),
@@ -238,6 +255,17 @@ class TestAnalyze:
         data, _ = compare.analyze(path, 0., None, tmp_path / "cache")
         assert [round(n["pitch"], 1) for n in data["notes"]] == [69., 72., 76.]
 
+    def test_ogg_input_gives_same_notes(self, tmp_path):
+        path = tmp_path / "reference.ogg"
+        soundfile.write(path, sa.synth(sa.REFERENCE_NOTES, 3.2), sa.RATE)
+        data, _ = compare.analyze(path, 0., None, tmp_path / "cache")
+        assert [round(n["pitch"], 1) for n in data["notes"]] == [69., 72., 76.]
+
+    def test_cache_key_includes_version(self, pair, tmp_path, monkeypatch):
+        compare.analyze(pair[0], 0., None, tmp_path / "cache")
+        monkeypatch.setattr(compare, "CACHE_VERSION", "test-bump")
+        assert compare.analyze(pair[0], 0., None, tmp_path / "cache")[1] is False
+
     def test_only_blips_gives_no_notes_error(self, tmp_path):
         # 15 ms tones stay under the 55 ms minimum even after the 40 ms
         # analysis window spreads them across neighbouring frames.
@@ -321,6 +349,20 @@ class TestCompare:
         ref, ren = [note(0, .5, 60., confidence=.8)], [note(0, .5, 60.)]
         assert compare.compare(as_data(ref), as_data(ren))["events"][0]["review"] is True
 
+    def test_note_match_scores(self):
+        ref = [note(1.0, 1.5, 69.), note(2.0, 2.5, 72.), note(3.0, 3.5, 76.)]
+        ren = [note(1.3, 1.8, 69.), note(2.32, 2.8, 72.3), note(3.3, 3.6, 74.)]
+        match = compare.compare(as_data(ref), as_data(ren))["note_match"]
+        # Shift 0.3 s removed; note 2 is 20 ms late and 30 cents sharp (inside
+        # the tolerances); note 3 is two semitones off, so it does not match.
+        assert match["onset_pitch"]["f1"] == pytest.approx(2 / 3)
+        # Note 2 ends 20 ms late: within 20% of 0.5 s, so offsets still match.
+        assert match["onset_pitch_offset"]["f1"] == pytest.approx(2 / 3)
+        assert match["tolerances"]["render_shift_s"] == pytest.approx(.3)
+
+    def test_note_match_with_no_notes(self):
+        assert compare.note_scores([], [note(0, .5, 60.)], 0.)["onset_pitch"]["f1"] == 0
+
     def test_repeated_neighbour_pitch_is_flagged(self):
         ref = [note(0, .3, 60.), note(.4, .7, 60.), note(.8, 1.1, 62.)]
         events = compare.compare(as_data(ref), as_data(ref))["events"]
@@ -332,8 +374,10 @@ class TestCompare:
 
 def result_for_markdown(events):
     level = {"peak": .5, "rms": .1}
+    score = {"precision": 1., "recall": 1., "f1": 1.}
     return {"reference_cache_hit": False, "render_minus_reference_offset_s": None,
             "render_gain_for_rms_match_db": 1.26, "reference": level, "render": level,
+            "note_match": {"onset_pitch": score, "onset_pitch_offset": {**score, "f1": .5}},
             "events": events}
 
 
@@ -365,6 +409,7 @@ class TestMarkdown:
         assert "Render gain for RMS comparison: +1.3 dB" in text
         assert "| — | 2.500 | — | — | — | — | extra render event |" in text
         assert "matched · review" in text
+        assert "Note match F1 (mir_eval, ±50 ms, ±50 cents): 1.00; with note ends: 0.50" in text
         assert text.endswith("\n")
 
 
@@ -401,6 +446,11 @@ class TestCommandLine:
         assert level[1] > level[0] > level[2]
         assert result["reference"]["file"] == "reference.wav"
         assert result["reference_cache_hit"] is False
+        assert result["note_match"]["onset_pitch"]["f1"] == 1.0
+        assert result["listening"]["method"] == "LUFS"
+        assert result["listening"]["gain_db"] == pytest.approx(5.2, abs=.5)
+        assert sorted(p.name for p in report.parent.iterdir()) == [
+            "comparison.json", "comparison.md", "reference-clip.wav", "render-level-matched.wav"]
         assert [sha256(p) for p in pair] == hashes
 
     def test_second_run_reuses_cache_and_makes_new_folder(self, pair, tmp_path):
@@ -411,6 +461,18 @@ class TestCommandLine:
         third = run_cli(*pair, "--reference-end", 3, cwd=tmp_path).stdout.strip()
         assert "Reference cache hit: False" in (tmp_path / third).read_text(encoding="utf-8")
         assert len(list((tmp_path / "outputs").iterdir())) == 3
+
+    def test_midi_and_no_listening_copy(self, pair, tmp_path):
+        proc = run_cli(*pair, "--midi", "--midi-program", 0, "--no-listening-copy",
+                       "--reference-start", .4, cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        folder = (tmp_path / proc.stdout.strip()).parent
+        assert sorted(p.name for p in folder.iterdir()) == [
+            "comparison.json", "comparison.md", "reference-notes.mid"]
+        (track,) = pretty_midi.PrettyMIDI(str(folder / "reference-notes.mid")).instruments
+        assert [n.pitch for n in track.notes] == [69, 72, 76]
+        assert track.notes[0].start == pytest.approx(.09, abs=.011)  # 0.49 s - 0.4 s
+        assert "Reference notes as MIDI: reference-notes.mid" in (folder / "comparison.md").read_text(encoding="utf-8")
 
     def test_custom_cache_output_and_limit(self, pair, tmp_path):
         proc = run_cli(*pair, "--cache", tmp_path / "c", "--output", tmp_path / "o",
@@ -426,12 +488,19 @@ class TestCommandLine:
         (["--reference-start", 2, "--reference-end", 1], "Ranges require"),
         (["--render-end", "nan"], "Ranges require"),
         (["--limit", 0], "--limit must be positive"),
+        (["--midi-program", 128], "--midi-program must be between 0 and 127"),
     ])
     def test_bad_arguments_exit_2(self, pair, tmp_path, args, message):
         proc = run_cli(*pair, *args, cwd=tmp_path)
         assert proc.returncode == 2
         assert proc.stderr.startswith("Comparison failed:") and message in proc.stderr
         assert not (tmp_path / "outputs").exists()
+
+    def test_unreadable_audio_exits_2(self, pair, tmp_path):
+        bad = tmp_path / "bad.wav"
+        bad.write_bytes(b"not audio")
+        proc = run_cli(bad, pair[1], cwd=tmp_path)
+        assert proc.returncode == 2 and "Cannot read audio" in proc.stderr
 
     def test_missing_file_exits_2(self, pair, tmp_path):
         proc = run_cli(tmp_path / "nope.wav", pair[1], cwd=tmp_path)
@@ -442,6 +511,43 @@ class TestCommandLine:
         assert proc.returncode == 0
         assert "Compare a solo recording with a notation render." in proc.stdout
         assert "--reference-start" in proc.stdout
+
+
+class TestListeningCopies:
+    def test_render_copy_matches_reference_loudness(self, pair, tmp_path):
+        info = compare.listening_copies(tmp_path, pair[0], [0., 3.2], pair[1], [0., 3.4], 0.)
+        assert info["method"] == "LUFS"
+        ref, rate = soundfile.read(tmp_path / "reference-clip.wav")
+        ren, _ = soundfile.read(tmp_path / "render-level-matched.wav")
+        meter = pyloudnorm.Meter(rate)
+        assert meter.integrated_loudness(ren) == pytest.approx(meter.integrated_loudness(ref), abs=.1)
+        assert info["gain_db"] == pytest.approx(info["reference_lufs"] - info["render_lufs"])
+        assert soundfile.info(tmp_path / "render-level-matched.wav").subtype == "FLOAT"
+
+    def test_clip_is_the_selected_range(self, pair, tmp_path):
+        compare.listening_copies(tmp_path, pair[0], [1., 2.5], pair[1], [0., 3.4], 0.)
+        assert soundfile.info(tmp_path / "reference-clip.wav").duration == pytest.approx(1.5)
+
+    def test_short_clip_falls_back_to_rms_gain(self, pair, tmp_path):
+        info = compare.listening_copies(tmp_path, pair[0], [.5, .8], pair[1], [.7, 1.], 4.5)
+        assert info["method"] == "RMS" and info["gain_db"] == 4.5
+        assert info["reference_lufs"] is None
+
+    def test_inputs_unchanged(self, pair, tmp_path):
+        before = [sha256(p) for p in pair]
+        compare.listening_copies(tmp_path, pair[0], [0., 3.2], pair[1], [0., 3.4], 0.)
+        assert [sha256(p) for p in pair] == before
+
+
+class TestMidi:
+    def test_notes_relative_to_range_start(self, tmp_path):
+        notes = [vars(note(1.5, 2., 69.2, rms=.1)), vars(note(2.5, 3., 71.6, rms=.01))]
+        compare.write_midi(tmp_path / "n.mid", notes, 1.0, program=40)
+        (track,) = pretty_midi.PrettyMIDI(str(tmp_path / "n.mid")).instruments
+        assert track.program == 40
+        assert [(round(n.start, 3), round(n.end, 3), n.pitch) for n in track.notes] == \
+            [(.5, 1., 69), (1.5, 2., 72)]
+        assert [n.velocity for n in track.notes] == [100, 60]  # 20 dB quieter
 
 
 def test_sample_script_writes_demo_pair(tmp_path):

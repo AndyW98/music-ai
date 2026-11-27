@@ -1,7 +1,7 @@
 # Dorico Audio Compare
 
-Compare a solo reference recording with a WAV exported from Dorico. The tool
-runs locally and needs Python 3.10 or later. It can run on a machine without
+Compare a solo reference recording with an audio export from Dorico. The tool
+runs locally and needs Python 3.12 or later. It can run on a machine without
 Dorico, and it never opens or edits a score.
 
 Full documentation: <https://andyw98.github.io/music-ai/>. New users should
@@ -14,7 +14,7 @@ uv venv .venv
 uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 ```
 
-Use PCM or floating-point WAV files. Export the same musical phrase from
+Use WAV (PCM or floating point), FLAC or OGG files. Export the same musical phrase from
 Dorico, or pass separate time ranges for the two recordings.
 
 ```powershell
@@ -22,7 +22,11 @@ Dorico, or pass separate time ranges for the two recordings.
 ```
 
 Each run prints the path to a new Markdown report under `outputs/` and saves
-all note matches and unmatched events as JSON alongside it. For a spoken
+all note matches and unmatched events as JSON alongside it. The same folder
+gets `reference-clip.wav` and `render-level-matched.wav`, loudness-matched
+copies for A/B listening (skip them with `--no-listening-copy`). Add `--midi`
+to also write the reference's detected notes as `reference-notes.mid`, which
+can be imported into Dorico as a first draft. For a spoken
 request through Codex, ask it to run the command against the two WAVs and
 read the Markdown report. The full JSON is available for follow-up questions.
 The cache in `work/cache/` stores the full pitch and RMS tracks keyed by
@@ -46,7 +50,12 @@ The render is altered by about +25 and −18 cents, +40 and −30 ms attack, and
   numbers relative to A440. Historical temperaments can produce real cents
   differences without implying an incorrect note.
 - Level differences use the RMS gain needed to match the selected clips. Peak
-  and RMS values before adjustment are also reported. Audio files stay intact.
+  and RMS values before adjustment are also reported. The listening copy is
+  matched by integrated loudness (LUFS) instead, and the report states the gain
+  used. Audio files stay intact.
+- The note match F1 score (from mir_eval) summarises how many notes agree
+  within 50 ms and 50 cents. Use it to check that a new draft is better overall
+  than the previous one.
 - The pitch tracker assumes one sounding note at a time. Legato repeated
   pitches, breath noise, ornaments, and tails can affect event boundaries.
   Review flags are heuristic. The report is intended to guide listening and
@@ -64,11 +73,15 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 
 The tests generate synthetic sample audio and cover every function plus the
 command line. The `Tests` workflow runs them on Windows and Linux with Python
-3.10 and 3.13. See [docs/testing.md](docs/testing.md).
+3.12 and 3.14. See [docs/testing.md](docs/testing.md).
 
 ## Dependencies
 
-- [NumPy](https://github.com/numpy/numpy) and [SciPy](https://github.com/scipy/scipy) at runtime
+- Runtime: [NumPy](https://github.com/numpy/numpy), [SciPy](https://github.com/scipy/scipy),
+  [soundfile](https://github.com/bastibe/python-soundfile) (audio files),
+  [pyloudnorm](https://github.com/csteinmetz1/pyloudnorm) (loudness matching),
+  [mir_eval](https://github.com/mir-evaluation/mir_eval) (note match scores) and
+  [pretty_midi](https://github.com/craffel/pretty-midi) (MIDI export)
 - [pytest](https://github.com/pytest-dev/pytest) for tests
 - [Zensical](https://github.com/zensical/zensical) for the documentation site
 - Optional: [uv](https://github.com/astral-sh/uv)

@@ -5,10 +5,14 @@ Guidance for coding agents working in this repository.
 ## What this is
 
 Dorico Audio Compare is a single-file Python CLI (`compare.py`). It compares a
-solo reference WAV with a WAV exported from Dorico and reports per-note pitch
-(cents), attack offset (ms), duration (ms) and RMS-adjusted level (dB). It
-uses only NumPy and SciPy. Dorico is not required. Windows is the main target
-platform. Python 3.10 is the minimum supported version.
+solo reference recording with an audio export from Dorico (WAV, FLAC or OGG)
+and reports per-note pitch (cents), attack offset (ms), duration (ms) and
+RMS-adjusted level (dB), plus a mir_eval note match score. It also writes
+loudness-matched listening copies and, with `--midi`, the reference's notes as
+MIDI. Dependencies: NumPy, SciPy, soundfile, pyloudnorm, mir_eval and
+pretty_midi; prefer these established libraries over new hand-written code.
+Dorico is not required. Windows is the main target platform. Python 3.12 is
+the minimum supported version.
 
 ## Commands
 
@@ -59,10 +63,12 @@ outputs.
 - **`segment`** splits notes on unpitched frames or a jump of more than 65 cents.
   It drops notes shorter than 55 ms. Pitches are fractional MIDI numbers
   (A4 = 69).
+- **`read_audio`** uses soundfile (libsndfile) and raises `ValueError` for
+  unreadable files, so the CLI reports them as `Comparison failed`.
 - **`analyze`** caches its result as JSON in `work/cache/`. The cache key is a
-  SHA-256 of `"v1:{start}:{end}"` plus the file's bytes. **Bump the `v1`
-  version tag whenever you change `track`, `segment` or the cached data's
-  shape.** Otherwise stale cache entries will be returned silently. Cache files
+  SHA-256 of `"{CACHE_VERSION}:{start}:{end}"` plus the file's bytes. **Bump
+  `CACHE_VERSION` whenever you change `read_audio`, `track`, `segment` or the
+  cached data's shape.** Otherwise stale cache entries will be returned silently. Cache files
   are written with exclusive create (`"x"`), and a corrupt entry is recomputed
   rather than trusted.
 - **`align`** is an edit-distance dynamic program. A pair is free within 35
@@ -72,19 +78,27 @@ outputs.
   one constant offset, taken from the first aligned pair within 60 cents.
   Levels add the gain that matches the two clips' overall RMS. The `review`
   flag is heuristic: a neighbouring note at the same pitch, 60 cents or more,
-  or confidence below 0.85.
+  or confidence below 0.85. `note_scores` adds mir_eval precision, recall and
+  F1 (onset ±50 ms, pitch ±50 cents, then also offsets within 20%) after
+  removing the same constant offset.
+- **`listening_copies`** writes `reference-clip.wav` and
+  `render-level-matched.wav` (32-bit float). The gain comes from pyloudnorm LUFS,
+  falling back to the RMS gain for clips under 0.4 s or near silence.
+  **`write_midi`** (with `--midi`) writes `reference-notes.mid` via pretty_midi,
+  with times relative to the range start and pitches rounded to semitones.
 - **`main`** creates a new `outputs/comparison-*/` folder per run (`mkdtemp`)
-  containing `comparison.md` (top `--limit` rows by largest difference) and
-  `comparison.json` (every event plus the detected notes). It prints the `.md`
+  containing `comparison.md` (top `--limit` rows by largest difference),
+  `comparison.json` (every event plus the detected notes) and the optional
+  audio and MIDI files above. It prints the `.md`
   path. On invalid input it exits with status 2 and prints
   `Comparison failed: …`.
 
 ## Conventions and constraints
 
 - **Input audio and Dorico projects are read-only.** Never write to the user's
-  WAV files or `.dorico` projects. Tests assert inputs are byte-for-byte unchanged.
+  audio files or `.dorico` projects. Every output is a new file. Tests assert inputs are byte-for-byte unchanged.
 - Recordings, Dorico projects, caches, reports and samples are git-ignored
-  (`*.wav`, `*.ogg`, `*.dorico`, `/work/`, `/outputs/`, `/samples/`,
+  (`*.wav`, `*.ogg`, `*.flac`, `*.dorico`, `/work/`, `/outputs/`, `/samples/`,
   `/site/`). Do not commit them. Tests generate their audio at run time with
   `tests/sample_audio.py`.
 - When reviewing results, read `comparison.md` first. Open `comparison.json`
@@ -96,7 +110,7 @@ outputs.
   `RENDER_OFFSET_S`, which the end-to-end tests use as expected values. Timing
   assertions allow about ±10 ms because of the 10 ms hop.
 - CI: `.github/workflows/tests.yml` runs pytest on Windows and Ubuntu with
-  Python 3.10 and 3.13. `.github/workflows/docs.yml` builds the docs on every
+  Python 3.12 and 3.14. `.github/workflows/docs.yml` builds the docs on every
   PR and deploys to GitHub Pages (https://andyw98.github.io/music-ai/) on
   pushes to `main`.
 - Validation on real Dorico exports is still pending. So far, results have

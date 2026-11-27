@@ -3,8 +3,8 @@
 ## Prepare the audio
 
 1. Use a **solo** line. The pitch tracker expects one note at a time.
-2. In Dorico, export the **same musical phrase** as a WAV file
-   (PCM or floating-point).
+2. In Dorico, export the **same musical phrase** as a WAV or FLAC file.
+   OGG Vorbis also works, which suits recordings from Wikimedia Commons. MP3 is not supported.
 3. Keep it short at first. A few bars is enough to check that notes are matched correctly.
 
 The two files do not need to start at the same moment. The tool removes a
@@ -39,6 +39,9 @@ outputs\comparison-ab12cd34\comparison.md
 | `--limit N` | `12` | Number of rows shown in `comparison.md`. The JSON always has every row. |
 | `--cache DIR` | `work/cache` | Folder for cached analysis. |
 | `--output DIR` | `outputs` | Folder in which each run creates a new report folder. |
+| `--no-listening-copy` | off | Skip writing the two listening WAVs. |
+| `--midi` | off | Also write the reference's detected notes as `reference-notes.mid`. |
+| `--midi-program N` | `73` (Flute) | General MIDI instrument for `--midi`, 0–127. |
 
 Times are in seconds and may be fractional, for example `--reference-start 2.5`.
 Starts must be 0 or more, and each end must be later than its start.
@@ -67,6 +70,13 @@ containing:
 - `comparison.md`: a short summary table of the largest differences.
 - `comparison.json`: every matched and unmatched event, plus the detected
   notes for both files.
+- `reference-clip.wav`: the selected reference range, unchanged.
+- `render-level-matched.wav`: the selected render range, turned up or down so
+  its loudness (LUFS) matches the reference. Both are 32-bit float WAVs.
+- `reference-notes.mid` (only with `--midi`): the reference's notes as MIDI,
+  starting at 0 s at the start of the selected range. Pitches are rounded to
+  the nearest semitone and velocity follows each note's level. The rhythm is
+  not quantized. Import it into a **new** Dorico project as a starting draft.
 
 Earlier reports are never overwritten.
 

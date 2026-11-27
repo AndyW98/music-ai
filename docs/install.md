@@ -1,6 +1,6 @@
 # Install on Windows
 
-You need **Python 3.10 or later**. The README uses
+You need **Python 3.12 or later**. The README uses
 [uv](https://docs.astral.sh/uv/) to create the virtual environment, but the
 standard `venv` module works too.
 
@@ -29,8 +29,9 @@ cd music-ai
     .\.venv\Scripts\python.exe -m pip install -r requirements.txt
     ```
 
-This installs NumPy and SciPy, the only dependencies, into `.venv`
-inside the project folder.
+This installs the dependencies (NumPy, SciPy, soundfile, pyloudnorm, mir_eval
+and pretty_midi) into `.venv` inside the project folder. See
+[Dependencies](dependencies.md) for what each one does.
 
 ## 3. Check it works
 
@@ -44,5 +45,5 @@ You should see the usage line and the list of options.
 
 The repository's `.gitignore` excludes the virtual environment (`.venv/`),
 the analysis cache (`work/`), the reports (`outputs/`) and all `*.wav`,
-`*.ogg` and `*.dorico` files. Recordings, projects and reports therefore
+`*.ogg`, `*.flac` and `*.dorico` files. Recordings, projects and reports therefore
 stay out of Git unless you add them on purpose.

@@ -1,7 +1,7 @@
 # Dorico Audio Compare
 
 Dorico Audio Compare is a small command-line tool. It compares a **solo
-reference recording** with a **WAV exported from Dorico** and shows how the
+reference recording** with **audio exported from Dorico** (WAV, FLAC or OGG) and shows how the
 render differs, note by note:
 
 - **Pitch** in cents
@@ -9,7 +9,11 @@ render differs, note by note:
 - **Duration** in milliseconds
 - **Level** in dB, after matching the overall loudness of the two clips
 
-It runs locally with Python, NumPy and SciPy. It does **not** need Dorico,
+It also scores how many notes match, writes loudness-matched copies for A/B
+listening, and can export the recording's notes as MIDI for a first Dorico
+draft.
+
+It runs locally with Python and a few well-known audio libraries. It does **not** need Dorico,
 and it never opens or edits a score. Your audio files are only read.
 
 ## Quick start (Windows)

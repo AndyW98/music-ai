@@ -5,19 +5,21 @@ note lists.
 
 ```mermaid
 flowchart LR
-  A[WAV file] --> B[read_audio]
+  A[Audio file] --> B[read_audio]
   B --> C[track: pitch every 10 ms]
   C --> D[segment: frames into notes]
   D --> E[(cache)]
   E --> F[align reference and render notes]
   F --> G[compare: cents, ms, dB]
   G --> H[comparison.json and comparison.md]
+  G --> I[listening copies and MIDI]
 ```
 
 ## 1. Reading audio
 
-Unsigned 8-bit, signed integer and floating-point WAV files are scaled to
-about −1 to 1. Stereo is mixed to mono for pitch tracking. Peak and RMS are
+Files are read with [soundfile](https://github.com/bastibe/python-soundfile)
+(libsndfile), so WAV in any PCM or float format, FLAC and OGG Vorbis all work.
+Samples are scaled to about −1 to 1. Stereo is mixed to mono for pitch tracking. Peak and RMS are
 measured on all channels within the selected range.
 
 ## 2. Pitch tracking
@@ -64,3 +66,16 @@ notes that follow it stay in sync. Audio is never stretched.
 - **Duration:** the difference in note length, in ms.
 - **Level:** `20·log10(render note RMS / reference note RMS)` plus the gain
   that matches the two clips' overall RMS.
+- **Note match score:** [mir_eval](https://github.com/mir-evaluation/mir_eval)'s
+  `transcription.precision_recall_f1_overlap`, with onsets within 50 ms and
+  pitch within 50 cents after removing the offset. It is calculated a second
+  time with note ends required within 20%.
+
+## 7. Listening copies and MIDI
+
+- [pyloudnorm](https://github.com/csteinmetz1/pyloudnorm) measures each clip's
+  integrated loudness (ITU-R BS.1770). The render copy gets the gain that makes
+  the two equal. Clips too short to measure (under 0.4 s) use the RMS gain instead.
+- With `--midi`, [pretty_midi](https://github.com/craffel/pretty-midi) writes
+  the reference's detected notes to a MIDI file. MIDI velocity is 100 for the
+  loudest note, minus 2 per dB quieter, with a minimum of 20.
