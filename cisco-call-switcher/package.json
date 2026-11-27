@@ -1,0 +1,10 @@
+{
+  "name": "cisco-call-switcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RoomOS macro: switch between several calls from the touch panel, keeping only the one you're viewing live.",
+  "type": "module",
+  "scripts": {
+    "test": "node --import ./test/register.js --test test/*.test.js"
+  }
+}
