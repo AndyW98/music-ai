@@ -4,6 +4,8 @@ Compare a solo reference recording with a WAV exported from Dorico. The tool
 runs locally and needs Python 3.10 or later. It can run on a machine without
 Dorico, and it never opens or edits a score.
 
+Full documentation: <https://andyw98.github.io/music-ai/>
+
 ## Windows setup
 
 ```powershell
@@ -41,3 +43,15 @@ audio content and selected time range.
 
 This version compares rendered audio. It does not transcribe editable notation,
 export from Dorico, or invoke Maestro. Use a short phrase first.
+
+## Documentation site
+
+The `docs/` folder is a [Zensical](https://zensical.org) site. The
+`Documentation` workflow builds it on every pull request and publishes it to
+GitHub Pages on pushes to `main`. GitHub Pages must be set to
+**Settings → Pages → Source: GitHub Actions** once. To preview it locally (Zensical needs Python 3.11 or later):
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe zensical==0.1.3
+.\.venv\Scripts\zensical.exe serve
+```
