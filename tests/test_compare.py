@@ -299,6 +299,11 @@ class TestAlign:
         pairs = compare.align(melody([60, 62, 64]), melody([60, 63, 64]))
         assert pairs == [(0, 0), (1, 1), (2, 2)]
 
+    def test_implausible_pitch_pair_stays_unmatched(self):
+        pairs = compare.align(melody([68, 47, 75]), melody([68, 73, 75]))
+        assert pairs[0] == (0, 0) and pairs[-1] == (2, 2)
+        assert set(pairs[1:-1]) == {(1, None), (None, 1)}
+
     def test_empty_render(self):
         assert compare.align(melody([60, 62]), []) == [(0, None), (1, None)]
 

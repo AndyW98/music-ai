@@ -200,13 +200,17 @@ def analyze(path, start, end, cache):
     return data, False
 
 
+MAX_PAIR_DISTANCE_CENTS = 300.0
+
+
 def align(original, render):
     """Global note alignment with insertions and deletions.
 
     Dynamic programming over the two note lists (like an edit distance).
     Pairing two notes costs up to 1.75 for pitch (free within 35 cents, then
     1 per 100 cents) plus up to 0.35 for a duration ratio. Skipping a note on
-    either side costs 1. Returns ``(reference_index, render_index)`` pairs in
+    either side costs 1. Notes more than three semitones apart are left
+    unpaired. Returns ``(reference_index, render_index)`` pairs in
     order, with ``None`` for an unmatched side.
     """
     n, m = len(original), len(render)
@@ -218,8 +222,10 @@ def align(original, render):
     for i, a in enumerate(original, 1):
         for j, b in enumerate(render, 1):
             cents = abs(a.pitch - b.pitch) * 100
-            ratio = abs(np.log((b.end - b.start) / (a.end - a.start)))
-            penalty = min(1.75, max(0., cents - 35) / 100) + min(.35, ratio * .2)
+            penalty = np.inf
+            if cents <= MAX_PAIR_DISTANCE_CENTS:
+                ratio = abs(np.log((b.end - b.start) / (a.end - a.start)))
+                penalty = min(1.75, max(0., cents - 35) / 100) + min(.35, ratio * .2)
             choices = (cost[i - 1, j - 1] + penalty,
                        cost[i - 1, j] + 1, cost[i, j - 1] + 1)
             k = min(range(3), key=choices.__getitem__)
@@ -380,7 +386,7 @@ def markdown(result, limit):
         # Unmatched events always sort first; otherwise rank by the largest
         # difference scaled to rough "noticeable" units (50 cents, 100 ms, 6 dB).
         if row["status"] != "matched":
-            return 10
+            return float("inf")
         return max(abs(row["pitch_cents"]) / 50, abs(row["onset_ms"] or 0) / 100,
                    abs(row["duration_ms"]) / 100, abs(row["relative_level_db"]) / 6)
 
@@ -415,7 +421,9 @@ def markdown(result, limit):
         cells.append(row["status"] + (" · review" if row.get("review") else ""))
         lines.append("| " + " | ".join(cells) + " |")
     lines.extend(["", "Deltas are render minus reference. Timing uses a fixed offset. "
-                  "Level is RMS-adjusted for comparison. Review flags are heuristic.", ""])
+                  "Level is RMS-adjusted for comparison. Review flags are heuristic.", "",
+                  "Unmatched events describe detector output. Check the audio and score "
+                  "before treating them as missing or extra written notes.", ""])
     return "\n".join(lines)
 
 

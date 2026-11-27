@@ -115,3 +115,46 @@ The JSON has the same information plus everything the Markdown leaves out.
   difference shows up as attack values that drift steadily in one direction.
 - **Level** compares RMS over each detected note. Reverb, room noise and
   sample release tails all affect it.
+
+
+## Case study: Bach Sarabande
+
+The opening (roughly 13 seconds) of Alex Murray's solo traverso recording was
+compared with a Dorico WAV rendered from a separate audio-only draft. The
+baseline run needed +31.7 dB for RMS matching and scored 0.09 F1. A rerun on
+the loudness-matched copy needed only +0.3 dB more for RMS matching, with
+the same F1. Comparing the original to itself gave 1.00 F1, a consistency
+check on identical input.
+
+The old alignment paired events over two octaves apart. Its pitch cost
+was capped, so such a pair could be cheaper than two gaps. The current
+alignment excludes pairs more than three semitones apart. That threshold
+is a guardrail. It does not establish which nearby pairs are correct.
+
+One reference event around 1.35 seconds was unmatched even though its
+pitch was already in the draft notation. Use the report to locate the
+passage, then check the detection, the render, and the written note before
+changing the score.
+
+### Repeat the comparison after a change
+
+1. Choose the same short musical phrase in the reference and render. Keep
+   the source files and previous runs.
+2. Check the actual signal levels. If they differ significantly, use the
+   listening copies for A/B review and rerun the comparison on the corrected
+   audio when you need to verify the level change.
+3. Review ambiguous events in musical order in the JSON. Check detected
+   pitches and attacks against the audio and locate the written note in Dorico.
+4. Make any supported notation correction in a new project version. Export
+   another WAV and compare the same phrase. The case study verified the level
+   correction. A report-driven score correction and fresh Dorico render
+   have yet to be validated.
+5. Keep the raw F1 for comparison. Systematic tuning and tempo drift can
+   suppress it. Future diagnostics could show those effects separately and
+   offer a chronological summary with note names for score review.
+
+[Recording: Alex Murray, CC BY-SA 2.0](https://commons.wikimedia.org/wiki/File:Bach_-_Partita_For_Solo_Flute_-_Traverso_-_3._Sarabande.ogg)
+
+With that guardrail, the same excerpt produced 13 paired events, down from
+16, with three implausible pairs left unmatched on both sides. The strict
+note-match F1 stayed at 0.09.
