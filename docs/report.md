@@ -27,6 +27,22 @@ Reference / Render peak/RMS
 :   The peak and RMS of each selected range before any adjustment, in full
     scale units (1.0 is the maximum).
 
+Note match F1
+:   The standard note-transcription score from
+    [mir_eval](https://github.com/mir-evaluation/mir_eval), from 0 to 1. A
+    render note counts as correct if its attack is within 50 ms and its pitch
+    is within 50 cents of a reference note, after removing the constant
+    offset. "With note ends" also requires the note to end within 20% of the
+    reference note's length (at least 50 ms). Use it to compare successive
+    drafts: higher is better.
+
+Listening copies
+:   The two listening files and the gain applied to the render copy. The gain
+    normally matches integrated loudness (LUFS, ITU-R BS.1770). For clips
+    under 0.4 s or near silence, it falls back to the RMS gain above. A peak
+    above 1.00 means the copy is louder than full scale, so lower the playback
+    volume.
+
 The table shows the `--limit` rows with the **largest differences first**.
 Unmatched events always come first. Matched notes are ranked by whichever is
 largest relative to these steps: 50 cents, 100 ms of attack, 100 ms of duration
@@ -69,6 +85,15 @@ The JSON has the same information plus everything the Markdown leaves out.
       "relative_level_db": 1.9, "review": false
     }
   ],
+  "note_match": {
+    "onset_pitch": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    "onset_pitch_offset": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    "tolerances": {"onset_s": 0.05, "pitch_cents": 50.0, "offset_ratio": 0.2, "render_shift_s": 0.2}
+  },
+  "listening": {
+    "files": ["reference-clip.wav", "render-level-matched.wav"], "method": "LUFS",
+    "gain_db": 5.2, "reference_lufs": -11.6, "render_lufs": -16.7, "matched_peak": 0.62
+  },
   "reference_cache_hit": false,
   "reference": {"file": "ref.wav", "range": [0.0, 3.2], "peak": 0.68, "rms": 0.25, "notes": ["…"]},
   "render":    {"file": "render.wav", "range": [0.0, 3.4], "peak": 0.34, "rms": 0.13, "notes": ["…"]}

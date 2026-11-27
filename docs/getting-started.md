@@ -2,11 +2,11 @@
 
 This guide starts from a Windows PC with nothing installed and ends with your
 first comparison report. It takes about 15 minutes. You do **not** need Dorico
-on the PC that runs the comparison, only the WAV file exported from it.
+on the PC that runs the comparison, only the audio file exported from it.
 
 ## Step 1: Install Python
 
-1. Download and install Python 3.10 or later for Windows from
+1. Download and install Python 3.12 or later for Windows from
    [python.org/downloads](https://www.python.org/downloads/). Follow the
    installer's instructions. If it offers an option to add Python to `PATH`,
    turn it on.
@@ -65,9 +65,8 @@ for other methods. If you would rather not install uv, use the
     .\.venv\Scripts\python.exe -m pip install -r requirements.txt
     ```
 
-This installs [NumPy](https://github.com/numpy/numpy) and
-[SciPy](https://github.com/scipy/scipy) into the `.venv` folder. Nothing is
-installed system-wide.
+This installs the libraries listed on the [Dependencies](dependencies.md) page
+into the `.venv` folder. Nothing is installed system-wide.
 
 ## Step 5: Try it on the sample audio
 
@@ -91,6 +90,10 @@ Markdown viewer. You should see three matched notes. Two of them are altered:
 
 Timings can differ by up to 10 ms, because the analysis works in 10 ms steps.
 
+The same folder also contains `reference-clip.wav` and
+`render-level-matched.wav`. Play them one after the other to hear the
+differences at equal loudness.
+
 ## Step 6: Export audio from Dorico
 
 On the computer with Dorico, export the phrase you want to check as **WAV**
@@ -98,13 +101,13 @@ from Dorico's **Export Audio** dialog. Steinberg's
 [Exporting the audio guide](https://steinberg.help/dorico_first_steps/v5/en/dorico_first_steps/topics/first_steps_print_export/first_steps_audio_exporting_t.html)
 shows how to open the dialog in your version. Tips:
 
-- Choose **WAV**. Any bit depth works.
+- Choose **WAV** (any bit depth) or **FLAC**. MP3 is not supported.
 - Export only the solo instrument, so that one note sounds at a time.
-- Copy the WAV to the PC that runs the comparison. The tool only reads it.
+- Copy the file to the PC that runs the comparison. The tool only reads it.
 
 ## Step 7: Compare your recording
 
-Put your solo recording (WAV) and the Dorico export somewhere convenient. They
+Put your solo recording (WAV, FLAC or OGG) and the Dorico export somewhere convenient. They
 do not need to be inside the project folder. Then run:
 
 ```powershell
@@ -118,6 +121,11 @@ time ranges in seconds:
 .\.venv\Scripts\python.exe compare.py "C:\Music\my-take.wav" "C:\Music\dorico-export.wav" `
   --reference-start 1.2 --reference-end 9 --render-end 8.4
 ```
+
+To start a new transcription from the recording itself, add `--midi`. The
+report folder then contains `reference-notes.mid`, which you can import into a
+**new** Dorico project as a rough first draft. Its rhythm is unquantized, so
+expect to tidy it up.
 
 Next, read [Read the report](report.md) to understand the numbers, and
 [Run a comparison](usage.md) for every option.

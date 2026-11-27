@@ -12,20 +12,22 @@ recordings are stored in the repository.
 ```
 
 The **Tests** GitHub workflow runs the same suite on every pull request, on
-Windows and Linux, with Python 3.10 and 3.13.
+Windows and Linux, with Python 3.12 and 3.14.
 
 ## What is covered
 
 | Area | Checks |
 |---|---|
-| `read_audio` | 8-bit, 16-bit, 32-bit integer and float WAV scaling; stereo shape; empty, NaN and infinite audio rejected |
+| `read_audio` | 8-bit, 16-bit, 32-bit integer and float WAV scaling; FLAC and OGG input; stereo shape; empty, NaN, infinite and unreadable audio rejected |
 | `track` | Pure tones from 131 Hz to 1760 Hz within 2 cents; a quarter-tone-sharp harmonic tone; frame timing; quiet frames unpitched; silent and too-short ranges rejected |
 | `segment` | Splitting on pitch changes and gaps; dropping notes under 55 ms; vibrato kept as one note; median and RMS values |
-| `analyze` | Sample notes detected; cache hit, renamed-copy hit, range and content misses; corrupt cache recovery; input file unchanged; range clamping; stereo; all sample formats; no-notes error |
+| `analyze` | Sample notes detected; OGG input; cache hit, renamed-copy hit, range, content and cache-version misses; corrupt cache recovery; input file unchanged; range clamping; stereo; all sample formats; no-notes error |
 | `align` | Identical, extra, missing and substituted notes; empty render |
-| `compare` | Offset, cents, attack, duration and RMS-adjusted level; unmatched and extra events; no-anchor case; every review-flag rule |
+| `compare` | Offset, cents, attack, duration and RMS-adjusted level; unmatched and extra events; no-anchor case; every review-flag rule; mir_eval note match scores |
+| `listening_copies` | LUFS match within 0.1 LU; clip covers the selected range; RMS fallback for short clips; float output; inputs unchanged |
+| `write_midi` | Note times relative to the range start, rounded pitches, velocity from level, program number |
 | `markdown` | Ordering by largest difference; `--limit`; header and missing values |
-| Command line | Full run on the sample pair with expected results; cache reuse and new folder per run; custom cache, output and limit; every argument error exits with status 2; `--help` |
+| Command line | Full run on the sample pair with expected results and output files; `--midi` and `--no-listening-copy`; cache reuse and new folder per run; custom cache, output and limit; every argument and unreadable-file error exits with status 2; `--help` |
 
 ## Sample audio
 
