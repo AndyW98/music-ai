@@ -12,11 +12,14 @@ docs_dir = "docs"
 site_dir = "site"
 nav = [
   { "Home" = "index.md" },
+  { "First-time setup" = "getting-started.md" },
   { "Install on Windows" = "install.md" },
   { "Run a comparison" = "usage.md" },
   { "Read the report" = "report.md" },
   { "How it works" = "how-it-works.md" },
   { "Troubleshooting" = "troubleshooting.md" },
+  { "Testing" = "testing.md" },
+  { "Dependencies" = "dependencies.md" },
 ]
 
 [project.theme]

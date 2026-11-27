@@ -25,13 +25,16 @@ The command prints the path to a new `comparison.md` report. A detailed
 
 ## Where to go next
 
+- **New here?** Start with the [first-time setup guide](getting-started.md).
 - [Install on Windows](install.md) explains how to set up Python and the dependencies.
 - [Run a comparison](usage.md) covers every command-line option, time ranges and caching.
 - [Read the report](report.md) explains each column and JSON field.
 - [How it works](how-it-works.md) describes pitch tracking, note matching and the measurements.
 - [Troubleshooting](troubleshooting.md) covers common errors and limitations.
+- [Testing](testing.md) explains how to run the unit tests.
+- [Dependencies](dependencies.md) links to every project the tool relies on.
 
 !!! note "Status"
-    The tool has passed synthetic tests with generated tones. It has not yet
+    The tool passes its unit tests on synthetic tones. It has not yet
     been validated on real Dorico exports, so treat the results as a guide
     for listening rather than a final verdict.
