@@ -1,2 +1,11 @@
 node_modules/
 .DS_Store
+/.venv/
+/work/
+/outputs/
+__pycache__/
+*.wav
+*.ogg
+*.dorico
+/site/
+/samples/

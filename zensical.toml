@@ -1,0 +1,67 @@
+# Documentation site configuration for Zensical (https://zensical.org).
+# Build locally with `zensical build`; preview with `zensical serve`.
+# Published to GitHub Pages by .github/workflows/docs.yml on pushes to main.
+
+[project]
+site_name = "Dorico Audio Compare"
+site_description = "Compare a solo reference recording with a Dorico WAV export."
+site_url = "https://andyw98.github.io/music-ai/"
+repo_url = "https://github.com/AndyW98/music-ai"
+repo_name = "AndyW98/music-ai"
+docs_dir = "docs"
+site_dir = "site"
+nav = [
+  { "Home" = "index.md" },
+  { "First-time setup" = "getting-started.md" },
+  { "Install on Windows" = "install.md" },
+  { "Run a comparison" = "usage.md" },
+  { "Read the report" = "report.md" },
+  { "How it works" = "how-it-works.md" },
+  { "Troubleshooting" = "troubleshooting.md" },
+  { "Testing" = "testing.md" },
+  { "Dependencies" = "dependencies.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
