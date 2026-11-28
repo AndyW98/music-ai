@@ -22,6 +22,8 @@ Bach's Sarabande is one validation example. Three audio-only renders scored 0.20
 
 ## Epic 3 — Align phrases and preserve timing
 
+**Status: done.** `--align phrase` with `--max-drift` (3.1), the *What the note match score reflects* diagnostics (3.2), and `notation-handoff.json` with `--midi-tempo`, `--midi-meter`, `--midi-quantize` and numbered revisions (3.3).
+
 - **3.1 — Pair events despite local drift.** As a reviewer, I want corresponding notes to stay aligned when the performer speeds up or slows down. **Acceptance:** Add optional phrase-level alignment with bounded drift. Preserve raw timestamps and unwarped timing errors, and leave uncertain passages unmatched. Cover repeats, long pauses, and an extra or missing note in tests.
 - **3.2 — Explain why a comparison score changed.** As a reviewer, I want to tell apart timing error, systematic tuning, and pitch disagreement. **Acceptance:** Keep the strict baseline F1 and report pitch, attack, duration, and tuning diagnostics separately. State any tuning correction, timing offset, or alignment applied.
 - **3.3 — Preserve performance time during notation import.** As a transcriber, I want readable rhythms while retaining the measured performance. **Acceptance:** Preserve note times in seconds and cents in the analysis output. Keep meter, tempo, and quantization choices explicit in the notation handoff, and generate a new version for each revision.

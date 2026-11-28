@@ -20,6 +20,8 @@ Input files are only ever opened for reading. Every output is a new file.
 import argparse
 import csv
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
@@ -30,7 +32,7 @@ import mir_eval
 import numpy as np
 import pretty_midi
 import pyloudnorm
-from scipy import signal
+from scipy import signal, stats
 import soundfile
 
 # Bump when ``read_audio``, ``track``, ``segment`` or the cached data changes,
@@ -318,15 +320,16 @@ def analyze(path, start, end, cache):
 MAX_PAIR_DISTANCE_CENTS = 300.0
 
 
-def align(original, render):
+def align(original, render, allowed=None):
     """Global note alignment with insertions and deletions.
 
     Dynamic programming over the two note lists (like an edit distance).
     Pairing two notes costs up to 1.75 for pitch (free within 35 cents, then
     1 per 100 cents) plus up to 0.35 for a duration ratio. Skipping a note on
     either side costs 1. Notes more than three semitones apart are left
-    unpaired. Returns ``(reference_index, render_index)`` pairs in
-    order, with ``None`` for an unmatched side.
+    unpaired, as are pairs for which ``allowed(i, j)`` is false. Returns
+    ``(reference_index, render_index)`` pairs in order, with ``None`` for an
+    unmatched side.
     """
     n, m = len(original), len(render)
     cost = np.zeros((n + 1, m + 1))
@@ -338,7 +341,7 @@ def align(original, render):
         for j, b in enumerate(render, 1):
             cents = abs(a.pitch - b.pitch) * 100
             penalty = np.inf
-            if cents <= MAX_PAIR_DISTANCE_CENTS:
+            if cents <= MAX_PAIR_DISTANCE_CENTS and (allowed is None or allowed(i - 1, j - 1)):
                 ratio = abs(np.log((b.end - b.start) / (a.end - a.start)))
                 penalty = min(1.75, max(0., cents - 35) / 100) + min(.35, ratio * .2)
             choices = (cost[i - 1, j - 1] + penalty,
@@ -348,11 +351,117 @@ def align(original, render):
     # Trace back from the bottom-right corner.
     pairs = []
     while n or m:
-        k = step[n, m]
+        k = int(step[n, m])
         pairs.append((n - 1 if k != 2 else None, m - 1 if k != 1 else None))
         n -= k != 2
         m -= k != 1
     return pairs[::-1]
+
+
+# Phrase alignment (--align phrase): a pair must sit within 0.25 s of the
+# local time map, and the map may drift at most --max-drift seconds from the
+# overall offset.
+PHRASE_TOLERANCE_S = .25
+DEFAULT_MAX_DRIFT_S = 1.
+# The time map follows a robust straight-line fit over the anchors within
+# 2 s on each side, so it tracks tempo drift but not each note's own timing.
+PHRASE_WINDOW_S = 2.
+
+
+def vote_offset(original, render):
+    """The render-minus-reference offset that lines up the most same-pitch notes.
+
+    Every same-pitch (within 60 cents) note pair votes for its start
+    difference, in 0.25 s bins. The best bin wins; a tie goes to the smallest
+    offset. Returns the median vote in that bin, or ``None``.
+    """
+    votes = np.array([b.start - a.start for a in original for b in render
+                      if abs(a.pitch - b.pitch) < .6])
+    if not len(votes):
+        return None
+    bins = np.round(votes / PHRASE_TOLERANCE_S)
+    values, counts = np.unique(bins, return_counts=True)
+    best = values[counts == counts.max()]
+    centre = best[np.argmin(np.abs(best))]
+    return float(np.median(votes[bins == centre]))
+
+
+class TimeMap:
+    """Piecewise-linear render-minus-reference offset through consistent anchors.
+
+    Anchors are matched pairs within 60 cents whose offset is within
+    ``max_drift`` of ``overall`` and within 0.25 s of the median of the other
+    anchors within 2 s, so an isolated mispairing (for example in a repeat)
+    does not bend the map. The map's value at each anchor is a
+    Theil-Sen line fitted to the other anchors within 2 s on each side, read
+    off at the anchor's own time through the median residual. With fewer
+    than three other anchors, it is the median offset of all anchors within
+    2 s, this one included. The anchor itself is
+    left out, so the map follows gradual drift while each note keeps its own
+    timing error. Between anchors the offset
+    is interpolated; beyond them it is held constant.
+    """
+
+    def __init__(self, original, render, pairs, overall, max_drift):
+        anchors = sorted((original[i].start, render[j].start - original[i].start) for i, j in pairs
+                         if i is not None and j is not None and abs(original[i].pitch - render[j].pitch) < .6)
+        anchors = [a for a in anchors if abs(a[1] - overall) <= max_drift]
+        keep = []
+        for k, anchor in enumerate(anchors):
+            neighbours = [o for m, (t, o) in enumerate(anchors)
+                          if m != k and abs(t - anchor[0]) <= PHRASE_WINDOW_S]
+            if not neighbours or abs(anchor[1] - np.median(neighbours)) <= PHRASE_TOLERANCE_S:
+                keep.append(anchor)
+        times = np.array([a[0] for a in keep])
+        raw = np.array([a[1] for a in keep])
+        smooth = []
+        for k, time in enumerate(times):
+            # Leave the anchor itself out, so its own timing error stays visible.
+            near = (np.abs(times - time) <= PHRASE_WINDOW_S) & (np.arange(len(times)) != k)
+            if near.sum() < 3 or not np.ptp(times[near]):
+                # Too few for a line: the median offset of the phrase so far.
+                smooth.append(np.median(raw[np.abs(times - time) <= PHRASE_WINDOW_S]))
+                continue
+            slope = stats.theilslopes(raw[near], times[near])[0]
+            smooth.append(np.median(raw[near] - slope * (times[near] - time)))
+        self.times, self.offsets, self.overall = times, np.array(smooth, dtype=float), overall
+
+    def __call__(self, time):
+        if not len(self.times):
+            return self.overall
+        return float(np.interp(time, self.times, self.offsets))
+
+    def at_render(self, time):
+        """The offset at a render-file time (the map read the other way)."""
+        if not len(self.times):
+            return self.overall
+        return float(np.interp(time, self.times + self.offsets, self.offsets))
+
+
+def align_phrases(original, render, max_drift=DEFAULT_MAX_DRIFT_S):
+    """Alignment that follows local tempo changes, within bounds.
+
+    1. ``vote_offset`` estimates the overall offset from the notes' timing,
+       so a repeated phrase is paired by where it is played, not only by its
+       notes.
+    2. ``align`` runs with pairs allowed only within ``max_drift`` of it.
+    3. A ``TimeMap`` is fitted through the consistent pairs and ``align``
+       runs again, allowing only pairs within 0.25 s of the map. Notes that do
+       not fit, such as an uncertain passage, are left unmatched.
+
+    Returns ``(pairs, time_map)``; ``time_map`` is ``None`` when no notes
+    share a pitch.
+    """
+    overall = vote_offset(original, render)
+    if overall is None:
+        return align(original, render), None
+    pairs = align(original, render, lambda i, j:
+                  abs(render[j].start - original[i].start - overall) <= max_drift)
+    for _ in range(2):
+        warp = TimeMap(original, render, pairs, overall, max_drift)
+        pairs = align(original, render, lambda i, j: abs(
+            render[j].start - original[i].start - warp(original[i].start)) <= PHRASE_TOLERANCE_S)
+    return pairs, TimeMap(original, render, pairs, overall, max_drift)
 
 
 def side_fields(prefix, note, index):
@@ -363,7 +472,8 @@ def side_fields(prefix, note, index):
             f"{prefix}_confidence": note.confidence if note else None}
 
 
-def compare(reference, rendered, event_map=None, instrument_range=None):
+def compare(reference, rendered, event_map=None, instrument_range=None, alignment="sequence",
+            max_drift=DEFAULT_MAX_DRIFT_S):
     """Measure render-minus-reference differences for every aligned pair.
 
     Timing is made relative to the first matched pair whose pitches agree
@@ -377,9 +487,18 @@ def compare(reference, rendered, event_map=None, instrument_range=None):
     written event they correspond to; see ``trace``. ``flag_pitches`` adds
     ``pitch_flags`` for likely octave errors and, with ``instrument_range``
     (low and high MIDI pitch), out-of-range notes. Flags never remove notes.
+
+    ``alignment="phrase"`` pairs notes with ``align_phrases``; each matched
+    row then also has ``local_offset_s`` and ``warped_onset_ms`` (the attack
+    difference after the local time map). ``onset_ms`` always stays the
+    unwarped value, measured after the constant offset only.
     """
     original, render = ([Note(**item) for item in x["notes"]] for x in (reference, rendered))
-    pairs = align(original, render)
+    warp = None
+    if alignment == "phrase":
+        pairs, warp = align_phrases(original, render, max_drift)
+    else:
+        pairs = align(original, render)
     anchors = [(i, j) for i, j in pairs if i is not None and j is not None
                and abs(original[i].pitch - render[j].pitch) < .6]
     # Constant offset between the files, taken from the first anchor note.
@@ -417,9 +536,18 @@ def compare(reference, rendered, event_map=None, instrument_range=None):
                        duration_ms=((b.end - b.start) - (a.end - a.start)) * 1000,
                        relative_level_db=float(20 * np.log10(b.rms / a.rms) + gain),
                        reasons=reasons)
+            if warp is not None:
+                local = warp(a.start)
+                row.update(local_offset_s=local, warped_onset_ms=(b.start - a.start - local) * 1000)
         rows.append(row)
+    alignment_info = {"method": alignment}
+    if alignment == "phrase":
+        alignment_info.update(
+            max_drift_s=max_drift, tolerance_s=PHRASE_TOLERANCE_S,
+            overall_offset_s=warp.overall if warp else None,
+            anchors=[[float(t), float(o)] for t, o in zip(warp.times, warp.offsets)] if warp else [])
     result = {"render_minus_reference_offset_s": shift, "render_gain_for_rms_match_db": gain,
-              "note_match": note_scores(original, render, shift or 0.)}
+              "note_match": note_scores(original, render, shift or 0.), "alignment": alignment_info}
     matches = None
     if event_map is not None:
         matches = match_written(render, event_map)
@@ -435,7 +563,82 @@ def compare(reference, rendered, event_map=None, instrument_range=None):
         if row["status"] == "matched":
             row["review"] = bool(row["reasons"])
     result["events"] = rows
+    result["diagnostics"] = diagnostics(rows, original, render, shift, warp)
     return result
+
+
+def diagnostics(rows, original, render, shift, warp=None):
+    """Explain the strict note-match score by pitch, timing, duration and tuning.
+
+    The strict F1 (``note_match``) is left unchanged. This adds:
+
+    - ``tuning_cents``: the median pitch difference of matched pairs, a
+      systematic tuning offset (for example a different A4 or temperament).
+    - Separate pitch, attack, duration and level statistics for matched pairs.
+    - ``causes``: why each reference note does or does not meet the strict
+      tolerances (50 cents, 50 ms) in this alignment: ``unmatched``,
+      ``pitch`` (outside 50 cents even after removing the tuning),
+      ``tuning`` (outside only because of it), ``timing`` (attack outside
+      50 ms), ``drift`` (outside 50 ms only before the local time map) or
+      ``within tolerance``. A note can count under more than one cause.
+    - ``f1_variants``: the mir_eval F1 again after removing the tuning, the
+      local drift (phrase alignment only), or both. These are diagnostics
+      only; no reported measurement is corrected.
+    - ``applied``: every adjustment behind the numbers.
+    """
+    matched = [r for r in rows if r["status"] == "matched"]
+
+    def stats(key, absolute=False):
+        values = np.array([r[key] for r in matched if r.get(key) is not None], dtype=float)
+        if not len(values):
+            return None
+        return {"count": len(values), "median": float(np.median(values)),
+                "median_abs": float(np.median(np.abs(values))),
+                "max_abs": float(np.max(np.abs(values)))}
+
+    tuning = float(np.median([r["pitch_cents"] for r in matched])) if matched else 0.
+    causes = {name: 0 for name in ("unmatched", "pitch", "tuning", "timing", "drift",
+                                   "within tolerance")}
+    for row in rows:
+        if row["reference_s"] is None:
+            continue
+        if row["status"] != "matched":
+            causes["unmatched"] += 1
+            continue
+        cents, onset = row["pitch_cents"], row["onset_ms"]
+        warped = row.get("warped_onset_ms")
+        bad_pitch = abs(cents) > PITCH_TOLERANCE_CENTS
+        bad_time = onset is None or abs(onset) > ONSET_TOLERANCE_S * 1000
+        if bad_pitch:
+            causes["tuning" if abs(cents - tuning) <= PITCH_TOLERANCE_CENTS else "pitch"] += 1
+        if bad_time:
+            causes["drift" if warped is not None and abs(warped) <= ONSET_TOLERANCE_S * 1000
+                   else "timing"] += 1
+        if not bad_pitch and not bad_time:
+            causes["within tolerance"] += 1
+
+    def moved(notes, cents=0., local=False):
+        out = []
+        for n in notes:
+            delta = (warp.at_render(n.start) - (shift or 0.)) if local and warp else 0.
+            out.append(Note(n.start - delta, n.end - delta, n.pitch - cents / 100, n.confidence, n.rms))
+        return out
+
+    def f1(notes):
+        return note_scores(original, notes, shift or 0.)["onset_pitch"]["f1"]
+
+    variants = {"strict": f1(render), "tuning_removed": f1(moved(render, tuning))}
+    if warp is not None:
+        variants["drift_removed"] = f1(moved(render, local=True))
+        variants["tuning_and_drift_removed"] = f1(moved(render, tuning, local=True))
+    return {"tuning_cents": tuning if matched else None,
+            "pitch_cents": stats("pitch_cents"), "onset_ms": stats("onset_ms"),
+            "warped_onset_ms": stats("warped_onset_ms"), "duration_ms": stats("duration_ms"),
+            "relative_level_db": stats("relative_level_db"),
+            "causes": causes, "f1_variants": variants,
+            "applied": {"timing_offset_s": shift, "alignment": "phrase" if warp is not None else "sequence",
+                        "local_time_map": warp is not None,
+                        "tuning_correction": "diagnostic F1 only; measurements are not corrected"}}
 
 
 # Suspect pitches (see ``flag_pitches``): an interval counts as an octave
@@ -818,6 +1021,10 @@ def note_scores(original, render, shift):
             continue
         ref_intervals, ref_hz = arrays(original, 0.)
         est_intervals, est_hz = arrays(render, shift)
+        # mir_eval rejects negative times; moving both lists equally changes no match.
+        lowest = min(ref_intervals.min(), est_intervals.min())
+        if lowest < 0:
+            ref_intervals, est_intervals = ref_intervals - lowest, est_intervals - lowest
         precision, recall, f1, _ = mir_eval.transcription.precision_recall_f1_overlap(
             ref_intervals, ref_hz, est_intervals, est_hz, onset_tolerance=ONSET_TOLERANCE_S,
             pitch_tolerance=PITCH_TOLERANCE_CENTS, offset_ratio=ratio)
@@ -970,7 +1177,7 @@ def midi_selection(notes, min_confidence=None, instrument_range=None):
 
 
 def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM, min_confidence=None,
-               instrument_range=None):
+               instrument_range=None, tempo=None, meter=None, quantize=None):
     """Write detected notes as a single-track MIDI file for importing into Dorico.
 
     Times are seconds from the start of the selected range at the MIDI default
@@ -981,25 +1188,85 @@ def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM, min_confi
 
     Every detected note is written unless a filter is given: notes below
     ``min_confidence``, or more than 50 cents outside ``instrument_range``
-    (low and high MIDI pitch), are left out. Returns what was written and
-    every excluded note with its reason, for the report.
+    (low and high MIDI pitch), are left out.
+
+    ``tempo`` (beats per minute, a beat being the ``meter``'s lower note) and
+    ``meter`` (``(numerator, denominator)``) are written into the file, with
+    the range start as bar 1 beat 1. ``quantize`` (in beats, needs ``tempo``)
+    moves each start and end to the nearest grid line. Without it, note times
+    stay exactly as performed. Returns the choices made, every excluded note
+    with its reason and, for each written note, its performed times and cents
+    next to what was written, for ``notation-handoff.json``.
     """
     kept, excluded = midi_selection(notes, min_confidence, instrument_range)
-    info = {"file": Path(path).name, "written": len(kept), "detected": len(notes),
-            "filters": {"min_confidence": min_confidence, "instrument_range": instrument_range},
-            "excluded": excluded}
+    numerator, denominator = meter or (4, 4)
+    seconds_per_beat = 60 / tempo if tempo else None
     loudest = max(n["rms"] for n in kept)
-    midi = pretty_midi.PrettyMIDI()
+    qpm = tempo * 4 / denominator if tempo else 120.
+    midi = pretty_midi.PrettyMIDI(initial_tempo=qpm)
+    if meter:
+        midi.time_signature_changes.append(pretty_midi.TimeSignature(numerator, denominator, 0))
     instrument = pretty_midi.Instrument(program=program)
-    for n in kept:
+    handoff, chosen = [], {id(n) for n in kept}
+    for index, n in enumerate(notes):
+        if id(n) not in chosen:
+            continue
+        start, end = max(0., n["start"] - range_start), max(0., n["end"] - range_start)
+        entry = {"note": index, "start_s": n["start"], "end_s": n["end"], "pitch": n["pitch"],
+                 "midi_pitch": int(np.clip(round(n["pitch"]), 0, 127)),
+                 "cents": (n["pitch"] - round(n["pitch"])) * 100, "confidence": n["confidence"]}
+        if tempo:
+            beats = [start / seconds_per_beat, end / seconds_per_beat]
+            if quantize:
+                first = round(beats[0] / quantize) * quantize
+                beats = [first, max(first + quantize, round(beats[1] / quantize) * quantize)]
+            written = [b * seconds_per_beat for b in beats]
+            entry.update(start_beat=beats[0], end_beat=beats[1],
+                         bar=int(beats[0] // numerator) + 1,
+                         beat=round(beats[0] % numerator + 1, 6),
+                         quantize_shift_ms=(written[0] - start) * 1000)
+            start, end = written
+        entry.update(written_start_s=start, written_end_s=end)
+        handoff.append(entry)
         db = 20 * np.log10(max(n["rms"], 1e-12) / loudest)
         velocity = int(np.clip(round(100 + 2 * db), 20, 127))
         instrument.notes.append(pretty_midi.Note(
-            velocity=velocity, pitch=int(np.clip(round(n["pitch"]), 0, 127)),
-            start=max(0., n["start"] - range_start), end=max(0., n["end"] - range_start)))
+            velocity=velocity, pitch=entry["midi_pitch"], start=start, end=end))
     midi.instruments.append(instrument)
     midi.write(str(path))
-    return info
+    return {"file": Path(path).name, "written": len(kept), "detected": len(notes),
+            "filters": {"min_confidence": min_confidence, "instrument_range": instrument_range},
+            "excluded": excluded, "tempo_bpm": tempo,
+            "meter": f"{numerator}/{denominator}" if meter else None,
+            "quantize_beats": quantize, "notes": handoff}
+
+
+def handoff_revision(output, reference_sha256, reference_range):
+    """``(revision, previous_folder)`` for a new notation handoff.
+
+    Counts earlier ``notation-handoff.json`` files under ``output`` made
+    from the same reference audio and range, so each new MIDI draft is the
+    next revision and earlier ones are never overwritten.
+    """
+    latest, previous = 0, None
+    for path in Path(output).glob("comparison-*/notation-handoff.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        reference = data.get("reference", {})
+        if reference.get("sha256") == reference_sha256 and reference.get("range") == list(reference_range):
+            if data.get("revision", 0) > latest:
+                latest, previous = data["revision"], path.parent.name
+    return latest + 1, previous
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def priority(row):
@@ -1007,11 +1274,13 @@ def priority(row):
 
     Events without a pair always come first; matched notes rank by their
     largest difference scaled to rough "noticeable" units (50 cents, 100 ms
-    of attack or duration, 6 dB).
+    of attack or duration, 6 dB). With phrase alignment the attack is taken
+    after the local time map.
     """
     if row["status"] != "matched":
         return float("inf")
-    return max(abs(row["pitch_cents"]) / 50, abs(row["onset_ms"] or 0) / 100,
+    onset = row["warped_onset_ms"] if row.get("warped_onset_ms") is not None else row["onset_ms"]
+    return max(abs(row["pitch_cents"]) / 50, abs(onset or 0) / 100,
                abs(row["duration_ms"]) / 100, abs(row["relative_level_db"]) / 6)
 
 
@@ -1079,6 +1348,39 @@ def detector_lines(check, limit=None):
     return lines
 
 
+def diagnostic_lines(diag, alignment):
+    """Markdown lines for ``diagnostics``: the score explained, with every adjustment."""
+    variants = diag["f1_variants"]
+    lines = [f"- Strict note match F1 (unchanged baseline): {variants['strict']:.2f}"]
+    if diag["tuning_cents"] is not None:
+        lines.append(f"- Systematic tuning: {diag['tuning_cents']:+.1f} cents (median of matched "
+                     f"pairs); F1 with it removed: {variants['tuning_removed']:.2f}")
+    if "drift_removed" in variants:
+        lines.append(f"- F1 with local drift removed: {variants['drift_removed']:.2f}; with "
+                     f"tuning and drift removed: {variants['tuning_and_drift_removed']:.2f}")
+    causes = diag["causes"]
+    lines.append("- Reference notes: " + ", ".join(
+        f"{count} {name}" for name, count in causes.items() if count) + " (a note can have more than one cause)")
+    for key, label, unit in (("pitch_cents", "Pitch", "cents"), ("onset_ms", "Attack", "ms"),
+                             ("warped_onset_ms", "Attack after the local time map", "ms"),
+                             ("duration_ms", "Duration", "ms"), ("relative_level_db", "Level", "dB")):
+        item = diag[key]
+        if item:
+            lines.append(f"- {label}: median {item['median']:+.1f} {unit}, median size "
+                         f"{item['median_abs']:.1f} {unit}, largest {item['max_abs']:.1f} {unit} "
+                         f"({item['count']} pairs)")
+    applied = diag["applied"]
+    method = alignment.get("method", applied["alignment"])
+    text = f"constant offset {number(applied['timing_offset_s'], 3)} s; {method} alignment"
+    if method == "phrase":
+        text += (f" (local time map through {len(alignment.get('anchors', []))} anchors, "
+                 f"drift at most ±{alignment['max_drift_s']:g} s, pairs within "
+                 f"±{alignment['tolerance_s']:g} s of the map)")
+    lines.append(f"- Applied: {text}; tuning removed only for the diagnostic F1. "
+                 "Reported cents and ms are not corrected.")
+    return lines
+
+
 def side_text(row, side):
     """One line describing the detected note on ``side`` of an event row."""
     if row[f"{side}_s"] is None:
@@ -1105,6 +1407,10 @@ def flagged_lines(result, limit):
             written = (f"{location(row['written'])}, {note_label(row['written']['pitch'])} "
                        f"({row['written']['source']})" if row["written"] else row["written_status"])
             lines.append(f"- Written: {written}")
+        if row.get("warped_onset_ms") is not None:
+            lines.append(f"- Timing: attack {number(row['onset_ms'])} ms after the constant offset, "
+                         f"{number(row['warped_onset_ms'])} ms after the local time map "
+                         f"(local offset {row['local_offset_s']:+.3f} s)")
         if row.get("reasons"):
             lines.append(f"- Why: {'; '.join(row['reasons'])}")
         excerpt = row.get("excerpt")
@@ -1144,6 +1450,11 @@ def markdown(result, limit):
                     else "; none excluded")
         lines.append(f"- Reference notes as MIDI: {midi['file']} ({midi['written']} of "
                      f"{midi['detected']} detected notes{excluded})")
+        timing = (f"{midi['tempo_bpm']:g} bpm in {midi['meter'] or '4/4'}, "
+                  + (f"quantized to {midi['quantize_beats']:g} beat" if midi["quantize_beats"]
+                     else "not quantized")) if midi["tempo_bpm"] else "performed timing, no tempo set"
+        lines.append(f"- Notation handoff: {midi.get('handoff', 'notation-handoff.json')}, revision "
+                     f"{midi.get('revision', 1)} ({timing})")
     for label in ("reference", "render"):
         count = len(result.get(label, {}).get("candidates", []))
         if count:
@@ -1173,6 +1484,9 @@ def markdown(result, limit):
         cells.append(row["status"] + (" · review" if row.get("review") else ""))
         lines.append("| " + " | ".join(cells) + " |")
     lines.extend(flagged_lines(result, limit))
+    if result.get("diagnostics"):
+        lines.extend(["", "## What the note match score reflects", "",
+                      *diagnostic_lines(result["diagnostics"], result.get("alignment", {}))])
     if result.get("detector_check"):
         lines.extend(["", "## Detector check (render against the event map)", "",
                       *detector_lines(result["detector_check"], limit)])
@@ -1279,6 +1593,17 @@ def main(argv=None):
                         help="leave notes below this tracker confidence (0-1) out of the MIDI file")
     parser.add_argument("--midi-skip-out-of-range", action="store_true",
                         help="leave notes outside --instrument-range out of the MIDI file")
+    parser.add_argument("--midi-tempo", type=float, metavar="BPM",
+                        help="tempo written into the MIDI file; a beat is the --midi-meter's lower note")
+    parser.add_argument("--midi-meter", metavar="N/D", help="time signature for the MIDI file, e.g. 3/4")
+    parser.add_argument("--midi-quantize", metavar="BEATS",
+                        help="move MIDI note starts and ends to this grid, in beats (e.g. 0.25 or 1/3); "
+                             "needs --midi-tempo")
+    parser.add_argument("--align", choices=("sequence", "phrase"), default="sequence",
+                        help="note pairing: sequence (default) or phrase, which follows local "
+                             "tempo changes")
+    parser.add_argument("--max-drift", type=float, default=DEFAULT_MAX_DRIFT_S, metavar="SECONDS",
+                        help="largest local timing drift --align phrase follows (default: 1)")
     parser.add_argument("--instrument-range", nargs=2, metavar=("LOW", "HIGH"),
                         help="lowest and highest pitch (e.g. C4 D7 or 60 98); notes outside "
                              "are flagged for review, never removed")
@@ -1303,6 +1628,28 @@ def main(argv=None):
             raise ValueError("--midi-min-confidence must be between 0 and 1")
         if args.midi_skip_out_of_range and not instrument_range:
             raise ValueError("--midi-skip-out-of-range needs --instrument-range")
+        if not (np.isfinite(args.max_drift) and args.max_drift > 0):
+            raise ValueError("--max-drift must be more than 0 seconds")
+        if args.midi_tempo is not None and not (np.isfinite(args.midi_tempo) and args.midi_tempo > 0):
+            raise ValueError("--midi-tempo must be more than 0")
+        meter = None
+        if args.midi_meter:
+            try:
+                meter = tuple(int(part) for part in args.midi_meter.split("/"))
+                if len(meter) != 2 or meter[0] < 1 or meter[1] < 1 or meter[1] & (meter[1] - 1):
+                    raise ValueError
+            except ValueError:
+                raise ValueError("--midi-meter must look like 3/4, with a power of 2 below") from None
+        quantize = None
+        if args.midi_quantize:
+            try:
+                quantize = float(Fraction(args.midi_quantize))
+            except (ValueError, ZeroDivisionError):
+                quantize = 0
+            if not quantize > 0:
+                raise ValueError("--midi-quantize must be a number of beats such as 0.25 or 1/3")
+            if args.midi_tempo is None:
+                raise ValueError("--midi-quantize needs --midi-tempo")
         events = read_event_map(args.event_map, args.event_map_offset) if args.event_map else None
         reference, hit = analyze(args.reference, args.reference_start, args.reference_end, args.cache)
         rendered, _ = analyze(args.render, args.render_start, args.render_end, args.cache)
@@ -1310,7 +1657,7 @@ def main(argv=None):
             # Check the filters before any output folder exists.
             midi_selection(reference["notes"], args.midi_min_confidence,
                            instrument_range if args.midi_skip_out_of_range else None)
-        result = compare(reference, rendered, events, instrument_range)
+        result = compare(reference, rendered, events, instrument_range, args.align, args.max_drift)
         result["instrument_range"] = instrument_range
         result["reference_cache_hit"] = hit
         for label, path, data in (("reference", args.reference, reference), ("render", args.render, rendered)):
@@ -1333,10 +1680,27 @@ def main(argv=None):
                            {"reference": reference["range"], "render": rendered["range"]},
                            gain, result["render_minus_reference_offset_s"])
         if args.midi:
-            result["midi"] = write_midi(
+            sha = file_sha256(args.reference)
+            revision, previous = handoff_revision(args.output, sha, reference["range"])
+            midi = write_midi(
                 folder / "reference-notes.mid", reference["notes"], reference["range"][0],
                 args.midi_program, args.midi_min_confidence,
-                instrument_range if args.midi_skip_out_of_range else None)
+                instrument_range if args.midi_skip_out_of_range else None,
+                args.midi_tempo, meter, quantize)
+            handoff = {"revision": revision, "previous": previous,
+                       "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                       "reference": {"file": args.reference.name, "sha256": sha,
+                                     "range": list(reference["range"])},
+                       "midi_file": midi["file"],
+                       "time_zero": "start of the reference range = bar 1 beat 1 in the MIDI file",
+                       **{k: midi[k] for k in ("tempo_bpm", "meter", "quantize_beats", "filters",
+                                               "excluded", "notes")},
+                       "candidates_not_written": len(reference["candidates"])}
+            (folder / "notation-handoff.json").write_text(
+                json.dumps(handoff, indent=2, allow_nan=False), encoding="utf-8")
+            result["midi"] = {**{k: v for k, v in midi.items() if k != "notes"},
+                              "handoff": "notation-handoff.json", "revision": revision,
+                              "previous_revision": previous}
         (folder / "comparison.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
         (folder / "comparison.md").write_text(markdown(result, args.limit), encoding="utf-8")
         print(folder / "comparison.md")

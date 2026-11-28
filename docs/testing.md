@@ -33,6 +33,9 @@ Windows and Linux, with Python 3.12 and 3.14.
 | Tracing | Detected pitch, confidence and note index on both sides; review reasons; written but undetected render notes; no mapped written event; render detections with no written note; undetected written events in musical order; far-off pitches ignored |
 | Detector check | Perfect match; missed, extra, merged, split and boundary issues; the synthetic validation phrase |
 | Excerpts | Context windows from neighbouring pairs; clips, ranges and gain from the command line; inputs unchanged |
+| Phrase alignment | Offset voting and ties; a skipped repeat paired by time; gradual drift with one late note (raw and warped attack kept); a long pause of different length; extra and missing notes; an uncertain note left unmatched; the drift bound; sequence as the default |
+| Diagnostics | Systematic tuning, pitch, timing, unmatched and drift causes; F1 with tuning and drift removed; adjustments stated; report section; negative times after the offset |
+| Notation handoff | Tempo, meter and quantization in the MIDI file; bars, beats and quantization shifts; performed times and cents kept; new revisions per run and per range; every handoff argument error; phrase alignment from the command line |
 | `markdown` | Ordering by largest difference; `--limit`; header and missing values |
 | Command line | Full run on the sample pair with expected results and output files; `--event-map`; `compare.py check`; event map errors; `--midi` and `--no-listening-copy`; cache reuse and new folder per run; custom cache, output and limit; every argument and unreadable-file error exits with status 2; `--help` |
 

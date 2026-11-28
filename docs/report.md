@@ -40,6 +40,10 @@ Reference notes as MIDI
 :   Only with `--midi`: how many of the detected notes were written and how
     many the MIDI filters left out.
 
+Notation handoff
+:   Only with `--midi`: the handoff revision and the tempo, meter and
+    quantization written into the MIDI file.
+
 Candidates
 :   How many fragments shorter than 55 ms were found on each side. They are
     not used as notes, but are kept in the JSON.
@@ -126,6 +130,22 @@ same largest-difference ranking. For each it shows:
 - with `--excerpts`, links to the two clips, their time ranges in the source
   files and the gain applied to the render clip.
 
+### What the note match score reflects
+
+This section explains the strict F1 without changing it:
+
+- the **systematic tuning** (median cents of the matched pairs) and the F1
+  with it removed;
+- with `--align phrase`, the F1 with the local drift removed, and with both
+  removed;
+- how many reference notes are `unmatched`, off in `pitch`, off only because
+  of `tuning`, off in `timing`, off only because of `drift`, or
+  `within tolerance`. A note can have more than one cause;
+- the median, median size and largest pitch, attack, duration and level
+  differences;
+- every adjustment applied: the constant offset, the alignment method and
+  its limits. The tuning is removed only for the diagnostic F1.
+
 ### Detector check
 
 With an event map, the report ends with a check of the render's detected
@@ -187,6 +207,14 @@ The JSON has the same information plus everything the Markdown leaves out.
 - `pitch_flags` lists suspect pitches. Each has a `kind`, the `side` it
   applies to, a `reason` and the pitch `evidence` (for example the
   neighbouring pitches, the interval in cents, or the written event).
+- With `--align phrase`, matched events also have `local_offset_s` (the
+  local time map's offset at that note) and `warped_onset_ms` (the attack
+  difference after it). `alignment` gives the method, `max_drift_s`,
+  `tolerance_s`, the `overall_offset_s` and the map's `anchors` as
+  `[reference_s, offset_s]`.
+- `diagnostics` has `tuning_cents`, statistics for `pitch_cents`,
+  `onset_ms`, `warped_onset_ms`, `duration_ms` and `relative_level_db`, the
+  `causes` counts, the `f1_variants` and what was `applied`.
 - With `--excerpts`, flagged events have an `excerpt` with the two files,
   their `range_s` in each source file, `render_gain_db` and `gain_method`.
 - With an event map, `event_map` holds the written events and
@@ -198,7 +226,9 @@ The JSON has the same information plus everything the Markdown leaves out.
 - `candidates` on each side lists fragments too short to be notes, with
   `start`, `end`, `pitch`, `confidence` and `reason`.
 - `midi` (with `--midi`) gives the `file`, the number of notes `written` and
-  `detected`, the `filters` used and every `excluded` note with its reason. `pitch` is a fractional MIDI number relative to
+  `detected`, the `filters` used, every `excluded` note with its reason, the
+  `tempo_bpm`, `meter` and `quantize_beats`, and the handoff `revision` and
+  `previous_revision` folder. `notation-handoff.json` has the per-note detail. `pitch` is a fractional MIDI number relative to
   A440. For example, `69.25` is A4 25 cents sharp.
 
 ## Interpreting the numbers
@@ -207,6 +237,8 @@ The JSON has the same information plus everything the Markdown leaves out.
   will show real cents differences that are intentional.
 - **Timing** uses one fixed offset for the whole range. A gradual tempo
   difference shows up as attack values that drift steadily in one direction.
+  Use `--align phrase` to follow it: the flagged events then show the attack
+  both before and after the local time map.
 - **Level** compares RMS over each detected note. Reverb, room noise and
   sample release tails all affect it.
 

@@ -77,6 +77,33 @@ distance:
 The report describes detected events. A missed detection, an ornament, or a written
 note error can all produce an unmatched event. Audio is never stretched.
 
+### Phrase alignment
+
+With `--align phrase`, pairing also follows **where** notes are played, so
+local tempo changes and repeats are handled:
+
+1. Every same-pitch note pair votes for its start difference, in 0.25 s bins.
+   The bin with the most votes gives the overall offset, and a tie goes to the
+   smallest offset. A repeated phrase that the render plays only once is then
+   paired with the copy at the right time.
+2. Notes are aligned as above, but only pairs within `--max-drift` (default
+   **1 s**) of that offset are allowed.
+3. A **local time map** is fitted through the pairs within 60 cents. Pairs
+   whose offset differs by more than 0.25 s from the other pairs within 2 s
+   are left out of the map. At each pair, the map is a robust
+   [Theil–Sen line](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.theilslopes.html)
+   through the *other* pairs within **2 s**, read off at that note. With fewer
+   than three other pairs, it is their median offset, this note included.
+   The map follows gradual drift, and each note keeps its own timing error.
+4. Notes are aligned once more (twice in all), allowing only pairs within
+   **0.25 s** of the map, and drift at most `--max-drift` from the overall
+   offset. A note that does not fit, such as an uncertain passage, is left
+   unmatched on both sides.
+
+Raw timestamps are never changed. `onset_ms` is still measured after the
+constant offset only. Phrase alignment adds `warped_onset_ms` (after the local
+map) and `local_offset_s` to each matched pair.
+
 ## 6. Measuring
 
 - **Offset:** the start difference of the first matched pair whose pitches
@@ -89,6 +116,22 @@ note error can all produce an unmatched event. Audio is never stretched.
   `transcription.precision_recall_f1_overlap`, with onsets within 50 ms and
   pitch within 50 cents after removing the offset. It is calculated a second
   time with note ends required within 20%.
+
+### Explaining the score
+
+The strict F1 stays the baseline. The report then separates its causes:
+
+- **Systematic tuning** is the median pitch difference of the matched pairs,
+  for example from a different A4 or a temperament.
+- Each reference note is counted as `unmatched`, `pitch` (more than 50 cents
+  off even after removing the tuning), `tuning` (off only because of it),
+  `timing` (attack more than 50 ms off), `drift` (more than 50 ms off only
+  before the local time map), or `within tolerance`.
+- The F1 is calculated again with the tuning removed, and, with phrase
+  alignment, with the local drift removed and with both removed. These are
+  diagnostics only. No measurement in the report is corrected.
+- Pitch, attack, duration and level are summarised separately (median,
+  median size and largest).
 
 ## 7. Listening copies and MIDI
 
@@ -106,6 +149,12 @@ note error can all produce an unmatched event. Audio is never stretched.
   (`--midi-min-confidence`, `--midi-skip-out-of-range`). The report counts
   the notes left out and the JSON lists each one with its reason. Candidates
   shorter than 55 ms are never written.
+- `notation-handoff.json` records the choices behind the MIDI file: tempo,
+  meter and quantization grid (all off unless given), each written note's
+  performed start and end in seconds and its cents next to the written
+  pitch, beat and bar, and how far quantization moved it. Each handoff is
+  numbered: the revision counts the earlier handoffs in the output folder
+  from the same reference audio and range.
 
 ## 8. Suspect pitches
 

@@ -32,7 +32,11 @@ beat, part and voice, and `--excerpts` to write short level-matched clips
 of each flagged event. `compare.py check render.wav notes.mid` measures what
 the note detector misses on a render with known notes. `--instrument-range C4 D7`
 flags notes the instrument cannot play, and suspected octave errors are flagged
-automatically. Flagged notes are never removed. For a spoken
+automatically. Flagged notes are never removed. `--align phrase` follows
+local tempo changes and repeats. The report explains the note match score by
+tuning, pitch, timing and drift. With `--midi`, `--midi-tempo`, `--midi-meter`
+and `--midi-quantize` set the notation handoff, recorded with every note's
+performed time in `notation-handoff.json`. For a spoken
 request through Codex, ask it to run the command against the two WAVs and
 read the Markdown report. The full JSON is available for follow-up questions.
 The cache in `work/cache/` stores the full pitch and RMS tracks keyed by
