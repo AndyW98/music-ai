@@ -80,6 +80,13 @@ outputs.
   cents, rising to a cost of 1.75, plus up to 0.35 for a duration ratio.
   Pairs more than 300 cents apart are excluded. Skipping a note costs 1.
   Unmatched notes become `None` on one side.
+- **`align_phrases`** (with `--align phrase`) votes an overall offset
+  (`vote_offset`), aligns within `--max-drift` (default 1 s) of it, fits a
+  `TimeMap` (leave-one-out Theil–Sen over anchors within 2 s, outliers over
+  0.25 s dropped) and re-aligns allowing only pairs within 0.25 s of the map.
+  Rows keep `onset_ms` unwarped and add `warped_onset_ms` and `local_offset_s`.
+- **`diagnostics`** keeps the strict F1 and adds tuning (median cents),
+  per-dimension stats, per-note `causes` and F1 with tuning and drift removed.
 - **`compare`** reports all deltas as *render minus reference*. Timing subtracts
   one constant offset, taken from the first aligned pair within 60 cents.
   Levels add the gain that matches the two clips' overall RMS. The `review`
@@ -100,6 +107,10 @@ outputs.
 - **`flag_pitches`** adds `pitch_flags` (octave_leap, octave_counterpart,
   octave_written, instrument_range, tracker_limit) with evidence. It only
   flags rows; it never removes notes. `--instrument-range LOW HIGH` sets the range.
+- `--midi` also writes `notation-handoff.json`: `--midi-tempo`, `--midi-meter`
+  and `--midi-quantize` choices, per-note performed seconds and cents, beats,
+  bars and quantize shifts, and a `revision` (`handoff_revision` counts
+  earlier handoffs for the same reference sha256 and range under `--output`).
 - **`write_midi`** writes every note unless `--midi-min-confidence` or
   `--midi-skip-out-of-range` is given, and returns the excluded notes for the
   report (`midi_selection` checks them before the output folder is made).

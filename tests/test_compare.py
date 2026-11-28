@@ -562,7 +562,7 @@ class TestCommandLine:
         assert proc.returncode == 0, proc.stderr
         folder = (tmp_path / proc.stdout.strip()).parent
         assert sorted(p.name for p in folder.iterdir()) == [
-            "comparison.json", "comparison.md", "reference-notes.mid"]
+            "comparison.json", "comparison.md", "notation-handoff.json", "reference-notes.mid"]
         (track,) = pretty_midi.PrettyMIDI(str(folder / "reference-notes.mid")).instruments
         assert [n.pitch for n in track.notes] == [69, 72, 76]
         assert track.notes[0].start == pytest.approx(.09, abs=.011)  # 0.49 s - 0.4 s
@@ -1017,3 +1017,212 @@ class TestMidiFilters:
         proc = run_cli(*pair, *args, cwd=tmp_path)
         assert proc.returncode == 2 and message in proc.stderr
         assert not (tmp_path / "outputs").exists()
+
+
+# --------------------------------------------------------------------------- phrase alignment
+
+
+def timed(times, pitches, length=.3):
+    return [note(t, t + length, float(p)) for t, p in zip(times, pitches)]
+
+
+def matched_pairs(result):
+    return [(e["reference_note"], e["render_note"]) for e in result["events"] if e["status"] == "matched"]
+
+
+class TestPhraseAlignment:
+    def test_vote_offset(self):
+        ref, ren = timed([0, 1, 2], [60, 62, 64]), timed([.3, 1.3, 2.32], [60, 62, 64])
+        assert compare.vote_offset(ref, ren) == pytest.approx(.3)
+        # A repeated phrase played once: two offsets tie, the smaller wins.
+        ref = timed([0, .4, 4, 4.4], [60, 62, 60, 62])
+        assert compare.vote_offset(ref, timed([.1, .5], [60, 62])) == pytest.approx(.1)
+        assert compare.vote_offset(timed([0], [60]), timed([0], [70])) is None
+
+    def test_missing_repeat_is_paired_by_time(self):
+        # Reference plays A B A C; the render plays only A C, starting with the first A.
+        a, b, c = [60, 62, 64], [65, 67, 69], [71, 72, 74]
+        ref = timed([o + k * .4 for o in (0, 1.5, 3, 4.5) for k in range(3)], a + b + a + c)
+        ren = timed([o + k * .4 + .1 for o in (0, 4.5) for k in range(3)], a + c)
+        sequence = compare.compare(as_data(ref), as_data(ren))
+        phrase = compare.compare(as_data(ref), as_data(ren), alignment="phrase")
+        assert matched_pairs(sequence)[:3] == [(6, 0), (7, 1), (8, 2)]  # the wrong A
+        assert matched_pairs(phrase) == [(0, 0), (1, 1), (2, 2), (9, 3), (10, 4), (11, 5)]
+
+    def test_gradual_drift_keeps_raw_and_warped_timing(self):
+        jitter = np.zeros(20)
+        jitter[10] = .12  # one genuinely late note
+        ref = timed([k * .5 for k in range(20)], [60 + k % 5 for k in range(20)])
+        ren = timed([k * .55 + jitter[k] for k in range(20)], [60 + k % 5 for k in range(20)])
+        result = compare.compare(as_data(ref), as_data(ren), alignment="phrase")
+        events = result["events"]
+        assert [e["status"] for e in events] == ["matched"] * 20
+        assert events[-1]["onset_ms"] == pytest.approx(950)  # raw, after the constant offset
+        assert events[-1]["warped_onset_ms"] == pytest.approx(0, abs=1)
+        assert events[-1]["local_offset_s"] == pytest.approx(.95, abs=.001)
+        assert events[10]["warped_onset_ms"] == pytest.approx(120, abs=5)
+        assert events[10]["reference_s"] == 5. and events[10]["render_s"] == pytest.approx(5.62)
+        alignment = result["alignment"]
+        assert alignment["method"] == "phrase" and alignment["max_drift_s"] == 1.
+        assert len(alignment["anchors"]) >= 19
+
+    def test_long_pause_of_different_length(self):
+        a, b = [60, 62, 64], [67, 65, 64]
+        ref = timed([k * .4 for k in range(3)] + [5 + k * .4 for k in range(3)], a + b)
+        ren = timed([k * .4 for k in range(3)] + [5.8 + k * .4 for k in range(3)], a + b)
+        events = compare.compare(as_data(ref), as_data(ren), alignment="phrase")["events"]
+        assert [e["status"] for e in events] == ["matched"] * 6
+        assert [round(e["warped_onset_ms"]) for e in events] == [0] * 6
+        assert [round(e["onset_ms"]) for e in events] == [0, 0, 0, 800, 800, 800]
+
+    def test_extra_and_missing_notes_with_drift(self):
+        pitches = [60, 62, 64, 65, 67, 69, 71, 72]
+        ref = timed([k * .5 for k in range(8)], pitches)
+        ren = timed([k * .52 for k in range(8)], pitches)
+        del ren[3]
+        ren.insert(5, note(2.7, 2.8, 80.))
+        events = compare.compare(as_data(ref), as_data(ren), alignment="phrase")["events"]
+        statuses = [e["status"] for e in events]
+        assert statuses.count("matched") == 7
+        assert statuses.count("unmatched reference event") == 1
+        assert statuses.count("extra render event") == 1
+
+    def test_uncertain_note_is_left_unmatched(self):
+        ref = timed([float(k) for k in range(9)], [60, 62] * 4 + [60])
+        ren = timed([k + (.5 if k == 4 else 0.) for k in range(9)], [60, 62] * 4 + [60])
+        sequence = compare.compare(as_data(ref), as_data(ren))["events"]
+        phrase = compare.compare(as_data(ref), as_data(ren), alignment="phrase")["events"]
+        assert [e["status"] for e in sequence] == ["matched"] * 9
+        assert [e["status"] for e in phrase].count("matched") == 8
+        unmatched = [e for e in phrase if e["status"] != "matched"]
+        assert {e["reference_note"] for e in unmatched} | {e["render_note"] for e in unmatched} == {4, None}
+
+    def test_max_drift_bounds_the_map(self):
+        ref = timed([k * .5 for k in range(30)], [60 + k % 5 for k in range(30)])
+        ren = timed([k * .6 for k in range(30)], [60 + k % 5 for k in range(30)])  # 2.9 s by the end
+        tight = compare.compare(as_data(ref), as_data(ren), alignment="phrase", max_drift=1.)
+        loose = compare.compare(as_data(ref), as_data(ren), alignment="phrase", max_drift=4.)
+        assert len(matched_pairs(tight)) < 30
+        assert len(matched_pairs(loose)) == 30
+
+    def test_sequence_is_the_default(self):
+        result = compare.compare(as_data(melody([60, 62])), as_data(melody([60, 62])))
+        assert result["alignment"] == {"method": "sequence"}
+        assert "warped_onset_ms" not in result["events"][0]
+
+
+class TestDiagnostics:
+    def test_systematic_tuning(self):
+        ref = melody([60, 62, 64, 65])
+        ren = [note(n.start, n.end, n.pitch + .6) for n in ref]
+        diag = compare.compare(as_data(ref), as_data(ren))["diagnostics"]
+        assert diag["tuning_cents"] == pytest.approx(60)
+        assert diag["f1_variants"]["strict"] == 0
+        assert diag["f1_variants"]["tuning_removed"] == 1
+        assert diag["causes"]["tuning"] == 4 and diag["causes"]["pitch"] == 0
+
+    def test_pitch_timing_and_unmatched_causes(self):
+        ref = melody([60, 62, 64, 65, 67])
+        ren = [note(0, .2, 60.), note(.3, .5, 64.), note(.7, .9, 64.), note(.9, 1.1, 65.)]
+        diag = compare.compare(as_data(ref), as_data(ren))["diagnostics"]
+        causes = diag["causes"]
+        assert causes["pitch"] == 1 and causes["timing"] == 1 and causes["unmatched"] == 1
+        assert causes["within tolerance"] == 2
+        assert diag["pitch_cents"]["max_abs"] == pytest.approx(200)
+        assert diag["onset_ms"]["max_abs"] == pytest.approx(100)
+        assert diag["applied"]["alignment"] == "sequence" and "drift_removed" not in diag["f1_variants"]
+
+    def test_drift_is_separated_from_timing(self):
+        ref = timed([k * .5 for k in range(20)], [60 + k % 5 for k in range(20)])
+        ren = timed([k * .55 for k in range(20)], [60 + k % 5 for k in range(20)])
+        diag = compare.compare(as_data(ref), as_data(ren), alignment="phrase")["diagnostics"]
+        assert diag["causes"]["drift"] == 19 and diag["causes"]["timing"] == 0
+        assert diag["f1_variants"]["strict"] < .2
+        assert diag["f1_variants"]["drift_removed"] == 1
+        assert diag["applied"]["local_time_map"] is True
+
+    def test_markdown_section(self):
+        ref = melody([60, 62])
+        result = compare.compare(as_data(ref), as_data(ref), alignment="phrase")
+        result.update(reference_cache_hit=False, reference={"peak": .5, "rms": .1},
+                      render={"peak": .5, "rms": .1})
+        text = compare.markdown(result, 12)
+        assert "## What the note match score reflects" in text
+        assert "Strict note match F1 (unchanged baseline): 1.00" in text
+        assert "phrase alignment" in text and "Reported cents and ms are not corrected" in text
+
+    def test_negative_times_after_the_offset_still_score(self):
+        assert compare.note_scores([note(0, .3, 60.)], [note(.05, .3, 60.)], .2)["onset_pitch"]["f1"] == 0
+
+
+class TestNotationHandoff:
+    notes = [vars(note(1.00, 1.48, 69.2)), vars(note(1.52, 1.98, 71.)), vars(note(2.07, 2.4, 72.))]
+
+    def test_tempo_meter_and_quantize(self, tmp_path):
+        info = compare.write_midi(tmp_path / "n.mid", self.notes, 1., tempo=60, meter=(3, 8),
+                                  quantize=.5)
+        midi = pretty_midi.PrettyMIDI(str(tmp_path / "n.mid"))
+        assert midi.get_tempo_changes()[1][0] == pytest.approx(30)  # quavers at 60 = crotchets at 30
+        (signature,) = midi.time_signature_changes
+        assert (signature.numerator, signature.denominator) == (3, 8)
+        (track,) = midi.instruments
+        assert [(round(n.start, 3), round(n.end, 3)) for n in track.notes] == [
+            (0, .5), (.5, 1.), (1., 1.5)]
+        first, second, third = info["notes"]
+        assert first["start_s"] == 1. and first["cents"] == pytest.approx(20)
+        assert third["start_beat"] == 1. and third["quantize_shift_ms"] == pytest.approx(-70)
+        assert (third["bar"], third["beat"]) == (1, 2)
+        assert info["tempo_bpm"] == 60 and info["meter"] == "3/8" and info["quantize_beats"] == .5
+
+    def test_bars_and_beats_without_quantize(self, tmp_path):
+        info = compare.write_midi(tmp_path / "n.mid", self.notes, 0., tempo=120, meter=(2, 4))
+        first = info["notes"][0]
+        assert first["start_beat"] == pytest.approx(2) and (first["bar"], first["beat"]) == (2, 1)
+        assert first["written_start_s"] == pytest.approx(1.) and first["quantize_shift_ms"] == 0
+
+    def test_no_tempo_keeps_performed_timing(self, tmp_path):
+        info = compare.write_midi(tmp_path / "n.mid", self.notes, 1.)
+        assert [n["written_start_s"] for n in info["notes"]] == pytest.approx([0, .52, 1.07])
+        assert "start_beat" not in info["notes"][0] and info["tempo_bpm"] is None
+
+    def test_cli_writes_new_revisions(self, pair, tmp_path):
+        def run(*extra):
+            proc = run_cli(*pair, "--midi", "--no-listening-copy", *extra, cwd=tmp_path)
+            assert proc.returncode == 0, proc.stderr
+            folder = (tmp_path / proc.stdout.strip()).parent
+            return folder, json.loads((folder / "notation-handoff.json").read_text(encoding="utf-8"))
+        first_folder, first = run()
+        second_folder, second = run("--midi-tempo", 100, "--midi-meter", "3/4", "--midi-quantize", "1/4")
+        _, other_range = run("--reference-end", 3)
+        assert (first["revision"], first["previous"]) == (1, None)
+        assert (second["revision"], second["previous"]) == (2, first_folder.name)
+        assert other_range["revision"] == 1
+        assert first["reference"]["sha256"] == sha256(pair[0])
+        assert second["tempo_bpm"] == 100 and second["meter"] == "3/4" and second["quantize_beats"] == .25
+        assert [round(n["pitch"]) for n in second["notes"]] == [69, 72, 76]
+        assert first_folder.exists() and (first_folder / "reference-notes.mid").exists()
+        text = (second_folder / "comparison.md").read_text(encoding="utf-8")
+        assert "Notation handoff: notation-handoff.json, revision 2 (100 bpm in 3/4, quantized to 0.25 beat)" in text
+
+    @pytest.mark.parametrize("args, message", [
+        (["--midi-quantize", "1/4"], "--midi-quantize needs --midi-tempo"),
+        (["--midi-tempo", 0], "--midi-tempo must be more than 0"),
+        (["--midi-meter", "3/5"], "--midi-meter must look like 3/4"),
+        (["--midi-meter", "x"], "--midi-meter must look like 3/4"),
+        (["--midi-tempo", 90, "--midi-quantize", "abc"], "--midi-quantize must be a number"),
+        (["--midi-tempo", 90, "--midi-quantize", "0"], "--midi-quantize must be a number"),
+        (["--max-drift", 0], "--max-drift must be more than 0"),
+    ])
+    def test_bad_arguments_exit_2(self, pair, tmp_path, args, message):
+        proc = run_cli(*pair, "--midi", *args, cwd=tmp_path)
+        assert proc.returncode == 2 and message in proc.stderr
+        assert not (tmp_path / "outputs").exists()
+
+    def test_cli_phrase_alignment(self, pair, tmp_path):
+        proc = run_cli(*pair, "--align", "phrase", "--max-drift", .5, "--no-listening-copy", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        folder = (tmp_path / proc.stdout.strip()).parent
+        result = json.loads((folder / "comparison.json").read_text(encoding="utf-8"))
+        assert result["alignment"]["method"] == "phrase" and result["alignment"]["max_drift_s"] == .5
+        np.testing.assert_allclose([e["warped_onset_ms"] for e in result["events"]], [0, 40, -30], atol=10.5)
+        assert result["diagnostics"]["f1_variants"]["strict"] == 1

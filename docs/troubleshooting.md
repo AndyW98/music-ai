@@ -24,6 +24,11 @@ All errors start with `Comparison failed:` (`Detector check failed:` for
 | `--instrument-range LOW must be below HIGH` | Put the lowest pitch first. |
 | `--midi-skip-out-of-range needs --instrument-range` | Add `--instrument-range`, or drop the option. |
 | `--midi-min-confidence must be between 0 and 1` | Use a value such as `0.85`. |
+| `--max-drift must be more than 0 seconds` | Use a value such as `0.5` or `2`. |
+| `--midi-tempo must be more than 0` | Give the tempo in beats per minute. |
+| `--midi-meter must look like 3/4, with a power of 2 below` | Use a time signature such as `4/4`, `3/4` or `6/8`. |
+| `--midi-quantize must be a number of beats such as 0.25 or 1/3` | Give the grid in beats, as a decimal or a fraction. |
+| `--midi-quantize needs --midi-tempo` | Add the tempo the grid is counted in. |
 | `--midi filters excluded every note` | Lower `--midi-min-confidence`, or widen `--instrument-range`. |
 | File or permission errors | Check the path. In PowerShell, put quotes around paths that contain spaces. |
 
@@ -34,7 +39,10 @@ Vorbis. MP3 is not supported, so convert it to WAV or FLAC first.
 
 **Many unmatched or extra events.**
 Check that both files contain the same phrase. Use the range options to
-trim count-ins, silence and anything outside the phrase.
+trim count-ins, silence and anything outside the phrase. If the attack values
+grow steadily or a repeat is paired with the wrong copy, try `--align phrase`.
+If phrase alignment leaves the end of a long passage unmatched, raise
+`--max-drift`.
 
 **Every note reads about 100 or 1200 cents off.**
 The render may be transposed (for example, a transposing instrument exported
@@ -72,6 +80,7 @@ passages that do not start at bar 1 shift them. Use a CSV with your own
 - **Solo only:** chords and overlapping notes are not supported.
 - The tool compares **rendered audio**. It does not transcribe notation, export
   from Dorico or edit the score.
-- Timing uses one fixed offset. There is no tempo warping.
+- Timing uses one fixed offset unless you pass `--align phrase`, which follows
+  local drift up to `--max-drift`. Audio is never stretched.
 - The automated tests use synthetic tones only. Use
   [Validate the detector](validation.md) to measure it on a real Dorico export.

@@ -47,6 +47,11 @@ outputs\comparison-ab12cd34\comparison.md
 | `--midi-program N` | `73` (Flute) | General MIDI instrument for `--midi`, 0–127. |
 | `--midi-min-confidence C` | none | Leave notes with tracker confidence below `C` (0–1) out of the MIDI file. |
 | `--midi-skip-out-of-range` | off | Leave notes outside `--instrument-range` out of the MIDI file. |
+| `--align sequence\|phrase` | `sequence` | How notes are paired. `phrase` follows local tempo changes and repeats. See [Follow tempo changes](#follow-tempo-changes). |
+| `--max-drift SECONDS` | `1` | The largest local drift `--align phrase` follows, from the overall offset. |
+| `--midi-tempo BPM` | none | Tempo written into the MIDI file. A beat is the `--midi-meter`'s lower note. |
+| `--midi-meter N/D` | none | Time signature written into the MIDI file, for example `3/4` or `6/8`. |
+| `--midi-quantize BEATS` | none | Move MIDI note starts and ends to this grid, in beats, for example `0.25` or `1/3`. Needs `--midi-tempo`. |
 | `--instrument-range LOW HIGH` | none | The instrument's lowest and highest pitch, as note names or MIDI numbers, for example `C4 D7`. Notes outside it are flagged for review. They are never removed from the report. |
 
 Times are in seconds and may be fractional, for example `--reference-start 2.5`.
@@ -79,6 +84,9 @@ containing:
 - `reference-clip.wav`: the selected reference range, unchanged.
 - `render-level-matched.wav`: the selected render range, turned up or down so
   its loudness (LUFS) matches the reference. Both are 32-bit float WAVs.
+- `notation-handoff.json` (only with `--midi`): the tempo, meter and
+  quantization behind the MIDI file, and each note's performed time and
+  cents. See [Hand the notes to Dorico](#hand-the-notes-to-dorico).
 - `excerpts/` (only with `--excerpts`): `event-NNN-reference.wav` and
   `event-NNN-render.wav` for each flagged event in the report. `NNN` is the
   event number used in the report and the JSON.
@@ -93,6 +101,49 @@ containing:
   `candidates` in the JSON.
 
 Earlier reports are never overwritten.
+
+## Follow tempo changes
+
+By default, notes are paired by their order and pitch, and timing uses one
+constant offset. If the performer speeds up or slows down, the attack values
+then grow steadily. If the render skips a repeat, the wrong copy can be paired.
+Use phrase alignment:
+
+```powershell
+.\.venv\Scripts\python.exe compare.py take3.wav dorico.wav --align phrase
+```
+
+It pairs notes by where they are played as well. It follows drift of up to
+`--max-drift` seconds (default 1) and leaves notes that do not fit unmatched.
+The raw times and the attack after the constant offset are kept. Each pair
+also gets the attack after the local time map. The report's *What the note
+match score reflects* section shows how much of the score is due to drift.
+See [How it works](how-it-works.md#phrase-alignment).
+
+## Hand the notes to Dorico
+
+`--midi` writes the reference's notes as `reference-notes.mid`, with
+`notation-handoff.json` next to it. By default the MIDI file keeps the
+performed timing at 120 crotchets per minute, unquantized. To get readable
+rhythms on import, give the tempo and meter you intend, and a grid:
+
+```powershell
+.\.venv\Scripts\python.exe compare.py take3.wav dorico.wav --midi `
+  --midi-tempo 72 --midi-meter 3/4 --midi-quantize 1/4
+```
+
+The start of the reference range is bar 1 beat 1, so start the range on a
+downbeat. The tempo counts the meter's lower note: in 6/8, `--midi-tempo 120`
+means 120 quavers per minute. The grid is in those beats: `0.5` is a
+semiquaver in 3/4, and `1/3` is a triplet.
+
+Quantization only changes the MIDI file. `comparison.json` and
+`notation-handoff.json` keep every note's performed time in seconds and its
+pitch in cents. The handoff also records the beat, the bar and how far each
+note was moved. Every run writes a new folder. The handoff's `revision`
+counts the earlier handoffs from the same reference audio and range in the
+output folder, and `previous` names the last one. Import each revision into a
+new Dorico project version.
 
 ## Locate events in the score
 
