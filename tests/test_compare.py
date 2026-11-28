@@ -194,6 +194,17 @@ class TestSegment:
                     frame[2] = .4
             assert len(compare.segment(frames, .01, len(frames) / 100)) == 2
 
+    def test_bridged_gaps_after_short_pitched_run(self):
+        frames = frames_for([69.] * 10 + [None] * 3 + [69.] * 2 +
+                            [None] * 3 + [69.] * 10)
+        for frame in frames:
+            if frame[1] is None:
+                frame[2] = .4
+        notes = compare.segment(frames, .01, len(frames) / 100)
+        assert len(notes) == 1
+        assert len(notes[0].gaps) == 2
+        assert notes[0].pitch == 69
+
     def legato(self, confidence=.95, dip=.25):
         frames = frames_for([76.] * 40)
         for k, frame in enumerate(frames):
