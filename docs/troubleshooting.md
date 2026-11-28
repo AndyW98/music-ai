@@ -2,7 +2,8 @@
 
 ## Error messages
 
-All errors start with `Comparison failed:` and exit with status 2.
+All errors start with `Comparison failed:` (`Detector check failed:` for
+`compare.py check`) and exit with status 2.
 
 | Message | What to do |
 |---|---|
@@ -14,6 +15,11 @@ All errors start with `Comparison failed:` and exit with status 2.
 | `Cannot read audio in <file>: …` | The file is not a format libsndfile can read (for example MP3, or a damaged file). Export as WAV or FLAC. |
 | `--midi-program must be between 0 and 127` | Use a General MIDI program number from 0 to 127. |
 | `--limit must be positive` | Use `--limit 1` or more. |
+| `Event map <file> needs time_s and pitch columns` | The CSV's first line must name the columns. See [Locate events in the score](usage.md#locate-events-in-the-score). |
+| `Event map <file> line N: …` | That line has an invalid time, pitch or duration. Times must be 0 or more, durations more than 0 and pitches 0–127 or a note name such as `C#5`. |
+| `No note events in event map <file>` | The CSV has no rows, or the MIDI file has only drum tracks. |
+| `Cannot read MIDI event map <file>: …` | The file is not a readable MIDI file. Export it from Dorico again. |
+| `--event-map-offset must be a finite number of seconds` | Use a number such as `0.5` or `-0.25`. |
 | File or permission errors | Check the path. In PowerShell, put quotes around paths that contain spaces. |
 
 Supported formats are those libsndfile reads, including WAV, FLAC and OGG
@@ -38,11 +44,22 @@ the attacks in `comparison.json` and listen to that passage.
 These can split or extend notes. Trim the range, or treat duration values near
 the ends of phrases with caution.
 
+**Every event shows `no mapped written event`.**
+The map's times probably do not line up with the WAV. Compare the first
+note's `time_s` with the first `render_s` in the report and pass the
+difference with `--event-map-offset`. A MIDI file must cover the same passage
+as the WAV.
+
+**The bar numbers are off by one or more.**
+Bars from a MIDI map count from the start of the MIDI file. Pickup bars and
+passages that do not start at bar 1 shift them. Use a CSV with your own
+`bar` column when the numbers matter.
+
 ## Limitations
 
 - **Solo only:** chords and overlapping notes are not supported.
 - The tool compares **rendered audio**. It does not transcribe notation, export
   from Dorico or edit the score.
 - Timing uses one fixed offset. There is no tempo warping.
-- So far it has been checked on synthetic tones only. Validation on real Dorico
-  exports is still pending.
+- The automated tests use synthetic tones only. Use
+  [Validate the detector](validation.md) to measure it on a real Dorico export.

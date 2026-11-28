@@ -379,6 +379,15 @@ class TestCompare:
 
 def result_for_markdown(events):
     level = {"peak": .5, "rms": .1}
+    for number, event in enumerate(events, 1):
+        event.setdefault("id", number)
+        event.setdefault("written", None)
+        event.setdefault("written_status", "no event map")
+        for side in ("reference", "render"):
+            present = event[f"{side}_s"] is not None
+            event.setdefault(f"{side}_end_s", event[f"{side}_s"] + .5 if present else None)
+            event.setdefault(f"{side}_pitch", 69. if present else None)
+            event.setdefault(f"{side}_confidence", .95 if present else None)
     score = {"precision": 1., "recall": 1., "f1": 1.}
     return {"reference_cache_hit": False, "render_minus_reference_offset_s": None,
             "render_gain_for_rms_match_db": 1.26, "reference": level, "render": level,
@@ -389,7 +398,10 @@ def result_for_markdown(events):
 def matched(cents=0., onset=0., duration=0., level=0., review=False, at=1.):
     return {"reference_s": at, "render_s": at, "status": "matched", "pitch_cents": cents,
             "onset_ms": onset, "duration_ms": duration, "relative_level_db": level,
-            "review": review}
+            "review": review, "reasons": ["low confidence"] if review else [],
+            "reference_end_s": at + .5, "render_end_s": at + .5, "reference_pitch": 69.,
+            "render_pitch": 69. + cents / 100, "reference_confidence": .95,
+            "render_confidence": .95}
 
 
 class TestMarkdown:
@@ -412,7 +424,7 @@ class TestMarkdown:
         assert "Reference cache hit: False" in text
         assert "first pitch-matched attack: — s" in text
         assert "Render gain for RMS comparison: +1.3 dB" in text
-        assert "| — | 2.500 | — | — | — | — | extra render event |" in text
+        assert "| 1 | — | 2.500 | — | A4 +0¢ | — | — | — | — | extra render event |" in text
         assert "matched · review" in text
         assert "Note match F1 (mir_eval, ±50 ms, ±50 cents): 1.00; with note ends: 0.50" in text
         assert text.endswith("\n")
@@ -559,4 +571,272 @@ def test_sample_script_writes_demo_pair(tmp_path):
     proc = subprocess.run([sys.executable, str(ROOT / "tests" / "sample_audio.py"), str(tmp_path / "s")],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert sorted(p.name for p in (tmp_path / "s").iterdir()) == ["reference.wav", "render.wav"]
+    assert sorted(p.name for p in (tmp_path / "s").iterdir()) == [
+        "reference.wav", "render.wav", "validation-events.csv", "validation-render.wav"]
+
+
+# --------------------------------------------------------------------------- event maps
+
+
+def write_map(path, rows, header="time_s,pitch,duration_s,bar,beat,part,voice"):
+    path.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+    return path
+
+
+def render_map(path, offset=0.):
+    """An event map CSV for the sample render (``RENDER_NOTES``)."""
+    rows = [f"{start + offset:.3f},{pitch},{duration:.3f},1,{k + 1},Flute,1"
+            for k, (start, duration, pitch, _) in enumerate(sa.RENDER_NOTES)]
+    return write_map(path, rows)
+
+
+class TestEventMap:
+    def test_csv_columns_note_names_and_sorting(self, tmp_path):
+        path = write_map(tmp_path / "m.csv", ["1.5,C#5,,2,1.5,Flute,", "0.5,69.25,0.4,1,1,Flute,1"])
+        first, second = compare.read_event_map(path)
+        assert first == {"time_s": .5, "end_s": pytest.approx(.9), "pitch": 69.25, "bar": 1,
+                         "beat": 1., "part": "Flute", "voice": "1", "source": "line 3"}
+        assert second["pitch"] == 73 and second["end_s"] is None and second["voice"] is None
+        assert second["beat"] == 1.5
+
+    def test_minimal_columns_bom_and_offset(self, tmp_path):
+        path = tmp_path / "m.csv"
+        path.write_text("\ufeffTime_s , Pitch\n1.0,A4\n", encoding="utf-8")
+        (event,) = compare.read_event_map(path, offset=.25)
+        assert event["time_s"] == 1.25 and event["pitch"] == 69 and event["bar"] is None
+
+    @pytest.mark.parametrize("rows, message", [
+        (["x,69"], "line 2"), (["1,H4"], "line 2"), (["-1,69"], "line 2"),
+        (["1,69,0"], "duration_s"), (["1,200"], "between 0 and 127"), ([], "No note events"),
+    ])
+    def test_bad_csv_is_a_value_error(self, tmp_path, rows, message):
+        path = write_map(tmp_path / "m.csv", rows, header="time_s,pitch,duration_s")
+        with pytest.raises(ValueError, match=message):
+            compare.read_event_map(path)
+
+    def test_missing_columns(self, tmp_path):
+        with pytest.raises(ValueError, match="needs time_s and pitch"):
+            compare.read_event_map(write_map(tmp_path / "m.csv", ["1"], header="time_s"))
+
+    def test_midi_gives_bar_beat_and_part(self, tmp_path):
+        midi = pretty_midi.PrettyMIDI(initial_tempo=120)
+        midi.time_signature_changes.append(pretty_midi.TimeSignature(3, 4, 0))
+        flute = pretty_midi.Instrument(73, name="Flute")
+        # 120 bpm in 3/4: a beat is 0.5 s and a bar 1.5 s.
+        for start, pitch in ((0., 69), (.5, 71), (1.75, 72)):
+            flute.notes.append(pretty_midi.Note(80, pitch, start, start + .4))
+        drums = pretty_midi.Instrument(0, is_drum=True)
+        drums.notes.append(pretty_midi.Note(80, 36, 0, .1))
+        midi.instruments += [flute, drums]
+        midi.write(str(tmp_path / "m.mid"))
+        events = compare.read_event_map(tmp_path / "m.mid")
+        assert [(e["bar"], e["beat"], e["pitch"]) for e in events] == [
+            (1, 1., 69), (1, 2., 71), (2, 1.5, 72)]
+        assert events[2]["end_s"] == pytest.approx(2.15)
+        assert events[0]["part"] == "Flute" and events[0]["voice"] is None
+        assert events[2]["source"] == "Flute note 3"
+
+    def test_unreadable_midi(self, tmp_path):
+        (tmp_path / "m.mid").write_bytes(b"not midi")
+        with pytest.raises(ValueError, match="Cannot read MIDI event map"):
+            compare.read_event_map(tmp_path / "m.mid")
+
+
+def written(time, pitch, end=None, bar=None, beat=None):
+    return {"time_s": time, "end_s": end, "pitch": float(pitch), "bar": bar, "beat": beat,
+            "part": None, "voice": None, "source": f"event at {time}"}
+
+
+class TestTrace:
+    def test_rows_carry_both_sides_without_a_map(self):
+        ref = [note(0, .5, 60., confidence=.9), note(1, 1.5, 62.)]
+        ren = [note(.2, .7, 60.1, confidence=.97)]
+        events = compare.compare(as_data(ref), as_data(ren))["events"]
+        first, second = events
+        assert [e["id"] for e in events] == [1, 2]
+        assert first["reference_pitch"] == 60. and first["render_pitch"] == 60.1
+        assert first["reference_confidence"] == .9 and first["render_confidence"] == .97
+        assert first["reference_end_s"] == .5 and first["render_end_s"] == .7
+        assert first["reference_note"] == 0 and first["render_note"] == 0
+        assert second["render_note"] is None and second["reasons"] == ["no detected render event"]
+        assert all(e["written"] is None and e["written_status"] == "no event map" for e in events)
+        assert "detector_check" not in compare.compare(as_data(ref), as_data(ren))
+
+    def test_review_reasons(self):
+        ref = [note(0, .3, 60., confidence=.8), note(.4, .7, 60.), note(.8, 1.1, 62.)]
+        ren = [note(0, .3, 60.), note(.4, .7, 60.), note(.8, 1.1, 63.)]
+        first, _, third = compare.compare(as_data(ref), as_data(ren))["events"]
+        assert first["review"] and len(first["reasons"]) == 2
+        assert "confidence below 0.85" in first["reasons"][1]
+        assert third["reasons"] == ["pitches differ by 60 cents or more"]
+
+    def test_written_event_without_render_detection(self):
+        # The render lacks the reference's second note, but the score has it.
+        ref = melody([60, 62, 64])
+        ren = [note(.1, .3, 60.), note(.7, .9, 64.)]
+        events = [written(.1, 60, bar=1, beat=1), written(.42, 62, bar=1, beat=2),
+                  written(.7, 64, bar=1, beat=3)]
+        rows = compare.compare(as_data(ref), as_data(ren), events)["events"]
+        missing = rows[1]
+        assert missing["status"] == "unmatched reference event"
+        assert missing["written_status"] == "mapped" and missing["written"]["beat"] == 2
+        assert missing["reasons"] == ["written event with no detected render event"]
+        assert missing["expected_render_s"] == pytest.approx(.4)
+        assert [r["written"]["beat"] for r in rows] == [1, 2, 3]
+
+    def test_no_mapped_written_event(self):
+        ref = melody([60, 62, 64])
+        ren = [note(0, .2, 60.), note(.6, .8, 64.)]
+        events = [written(0, 60), written(.6, 64)]
+        rows = compare.compare(as_data(ref), as_data(ren), events)["events"]
+        assert rows[1]["status"] == "unmatched reference event"
+        assert rows[1]["written"] is None and rows[1]["written_status"] == "no mapped written event"
+        assert rows[1]["reasons"] == ["no detected render event"]
+
+    def test_render_detection_without_written_event_is_flagged(self):
+        notes = melody([60, 62])
+        rows = compare.compare(as_data(notes), as_data(notes), [written(0, 60)])["events"]
+        assert rows[0]["written_status"] == "mapped" and rows[0]["review"] is False
+        assert rows[1]["written_status"] == "no mapped written event"
+        assert rows[1]["review"] is True
+        assert rows[1]["reasons"] == ["render detection has no mapped written event"]
+
+    def test_undetected_written_event_is_placed_in_order(self):
+        notes = [note(0, .2, 60.), note(.6, .8, 64.)]
+        events = [written(0, 60), written(.3, 62), written(.6, 64)]
+        rows = compare.compare(as_data(notes), as_data(notes), events)["events"]
+        assert [r["status"] for r in rows] == ["matched", "undetected written event", "matched"]
+        assert [r["id"] for r in rows] == [1, 2, 3]
+        assert rows[1]["reference_s"] is None and rows[1]["render_s"] is None
+        assert rows[1]["expected_render_s"] == .3
+
+    def test_written_event_far_off_pitch_is_not_used(self):
+        ref = melody([60, 62, 64])
+        ren = [note(0, .2, 60.), note(.6, .8, 64.)]
+        events = [written(0, 60), written(.3, 67), written(.6, 64)]
+        rows = compare.compare(as_data(ref), as_data(ren), events)["events"]
+        assert rows[1]["written_status"] == "no mapped written event"
+        assert rows[2]["status"] == "undetected written event"
+
+
+class TestDetectorCheck:
+    def check(self, notes, events):
+        return compare.check_detector(notes, events, compare.match_written(notes, events))
+
+    def test_perfect_match(self):
+        notes = [note(0, .4, 60.), note(.5, .9, 62.)]
+        result = self.check(notes, [written(0, 60, .4), written(.5, 62, .9)])
+        assert (result["precision"], result["recall"], result["f1"]) == (1, 1, 1)
+        assert result["issues"] == [] and result["median_onset_ms"] == 0
+
+    def test_missed_and_extra(self):
+        notes = [note(0, .4, 60.), note(1., 1.3, 70.)]
+        result = self.check(notes, [written(0, 60, .4), written(.5, 62, .9)])
+        assert [i["kind"] for i in result["issues"]] == ["missed", "extra"]
+        assert result["false_negatives"] == 1 and result["false_positives"] == 1
+        assert result["precision"] == .5 and result["recall"] == .5
+
+    def test_merged_repeated_note(self):
+        notes = [note(0, 1., 60.)]
+        result = self.check(notes, [written(0, 60, .5), written(.5, 60, 1.)])
+        merged = result["issues"][-1]
+        assert merged["kind"] == "merged" and merged["detection"] == 0
+        assert result["merged_count"] == 1 and result["boundary_count"] == 1
+
+    def test_split_note(self):
+        notes = [note(0, .4, 60.), note(.45, 1., 60.)]
+        result = self.check(notes, [written(0, 60, 1.)])
+        kinds = [i["kind"] for i in result["issues"]]
+        assert "split" in kinds and result["split_count"] == 1
+        assert result["false_positives"] == 1
+
+    def test_boundary_error(self):
+        notes = [note(.04, .5, 60.)]
+        (issue,) = self.check(notes, [written(0, 60, .5)])["issues"]
+        assert issue["kind"] == "boundary" and issue["onset_ms"] == pytest.approx(40)
+
+    def test_validation_sample(self, tmp_path):
+        audio, events = sa.make_validation(tmp_path)
+        data, _ = compare.analyze(audio, 0., None, tmp_path / "cache")
+        notes = [Note(**n) for n in data["notes"]]
+        mapped = compare.read_event_map(events)
+        result = self.check(notes, mapped)
+        assert result["written_events"] == len(sa.VALIDATION_SCORE)
+        # Every note is found except the slurred repeated E5, which merges.
+        assert result["merged_count"] == 1 and result["missed_count"] == 0
+        assert result["extra_count"] == result["split_count"] == 0
+        merged = next(i for i in result["issues"] if i["kind"] == "merged")
+        assert (merged["written"]["bar"], merged["written"]["beat"]) == (3, 2)
+        assert abs(result["median_onset_ms"]) <= 11
+
+
+class TestExcerpts:
+    def test_windows_cover_neighbouring_pairs(self):
+        ref = melody([60, 62, 64])
+        ren = [note(.5, .7, 60.), note(1.1, 1.3, 64.)]
+        result = compare.compare(as_data(ref), as_data(ren))
+        windows = compare.excerpt_windows(result["events"], 1, result["render_minus_reference_offset_s"])
+        assert windows["reference"] == (0, pytest.approx(.8))
+        assert windows["render"] == (.5, pytest.approx(1.3))
+
+    def test_cli_writes_clips_for_flagged_events(self, tmp_path):
+        ref = sa.write_wav(tmp_path / "ref.wav", sa.synth(sa.REFERENCE_NOTES, 3.2))
+        # The render drops the reference's second note.
+        ren = sa.write_wav(tmp_path / "ren.wav", sa.synth(sa.RENDER_NOTES[::2], 3.4, gain=.5))
+        hashes = [sha256(ref), sha256(ren)]
+        proc = run_cli(ref, ren, "--excerpts", "--no-listening-copy", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        folder = (tmp_path / proc.stdout.strip()).parent
+        result = json.loads((folder / "comparison.json").read_text(encoding="utf-8"))
+        flagged = [e for e in result["events"] if "excerpt" in e]
+        assert [e["status"] for e in flagged] == ["unmatched reference event"]
+        excerpt = flagged[0]["excerpt"]
+        assert excerpt["gain_method"] == "LUFS" and excerpt["render_gain_db"] > 4
+        assert excerpt["reference"]["range_s"][0] == pytest.approx(.25, abs=.011)
+        assert excerpt["render"]["file"] == "excerpts/event-002-render.wav"
+        start, stop = excerpt["render"]["range_s"]
+        assert soundfile.info(folder / excerpt["render"]["file"]).duration == pytest.approx(stop - start, abs=1e-3)
+        text = (folder / "comparison.md").read_text(encoding="utf-8")
+        assert "## Flagged events in musical order" in text
+        assert "[render](excerpts/event-002-render.wav)" in text
+        assert [sha256(ref), sha256(ren)] == hashes
+
+
+class TestEventMapCommandLine:
+    def test_comparison_with_event_map(self, pair, tmp_path):
+        mapped = render_map(tmp_path / "map.csv")
+        proc = run_cli(*pair, "--event-map", mapped, cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        folder = (tmp_path / proc.stdout.strip()).parent
+        result = json.loads((folder / "comparison.json").read_text(encoding="utf-8"))
+        assert [e["written"]["beat"] for e in result["events"]] == [1, 2, 3]
+        assert result["detector_check"]["recall"] == 1
+        assert result["event_map"]["file"] == "map.csv"
+        text = (folder / "comparison.md").read_text(encoding="utf-8")
+        assert "bar 1 beat 2 · Flute · voice 1" in text
+        assert "## Detector check" in text
+
+    def test_check_command(self, tmp_path):
+        audio, events = sa.make_validation(tmp_path / "v")
+        proc = run_cli("check", audio, events, cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        report = tmp_path / proc.stdout.strip()
+        assert report.name == "detector-check.md"
+        result = json.loads((report.parent / "detector-check.json").read_text(encoding="utf-8"))
+        assert result["detector_check"]["merged_count"] == 1
+        text = report.read_text(encoding="utf-8")
+        assert "1 merged" in text and "bar 3 beat 2" in text
+
+    @pytest.mark.parametrize("args, message", [
+        (["--event-map", "missing.csv"], "Comparison failed"),
+        (["--event-map-offset", "inf"], "--event-map-offset"),
+    ])
+    def test_bad_event_map_arguments_exit_2(self, pair, tmp_path, args, message):
+        proc = run_cli(*pair, *args, cwd=tmp_path)
+        assert proc.returncode == 2 and message in proc.stderr
+        assert not (tmp_path / "outputs").exists()
+
+    def test_bad_check_map_exits_2(self, pair, tmp_path):
+        bad = write_map(tmp_path / "bad.csv", ["x,69"])
+        proc = run_cli("check", pair[1], bad, cwd=tmp_path)
+        assert proc.returncode == 2 and proc.stderr.startswith("Detector check failed:")

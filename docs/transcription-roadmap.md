@@ -6,6 +6,8 @@ Bach's Sarabande is one validation example. Three audio-only renders scored 0.20
 
 ## Epic 1 — Make each discrepancy reviewable
 
+**Status: done.** `--event-map` (1.1), `--excerpts` and the flagged-events section (1.2), and `compare.py check` with [Validate the detector](validation.md) (1.3).
+
 - **1.1 — Trace detections to score events.** As a reviewer, I want to locate a flagged event in both audio files and in Dorico. **Acceptance:** Show reference and render timestamps, detected pitch and confidence on both sides, and bar, beat, part, and voice when an optional event map is provided. Distinguish “no detected render event” from “no mapped written event.” Comparisons without a map still work.
 - **1.2 — Audition a discrepancy.** As a reviewer, I want to hear the same musical context on both sides. **Acceptance:** Generate short, level-matched excerpts for selected flags. Include their source time ranges and applied gain. Link the clips from a chronological Markdown view and keep full event details in JSON.
 - **1.3 — Validate against known rendered events.** As a maintainer, I want to know what the detector misses on real Dorico audio. **Acceptance:** Document a reproducible solo test score and render procedure, including repeated pitches, slurs, rests, and quiet notes. Compare against known note events and report false positives, false negatives, and boundary errors. Keep personal scores and recordings out of Git.

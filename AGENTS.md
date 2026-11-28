@@ -8,8 +8,10 @@ Dorico Audio Compare is a single-file Python CLI (`compare.py`). It compares a
 solo reference recording with an audio export from Dorico (WAV, FLAC or OGG)
 and reports per-note pitch (cents), attack offset (ms), duration (ms) and
 RMS-adjusted level (dB), plus a mir_eval note match score. It also writes
-loudness-matched listening copies and, with `--midi`, the reference's notes as
-MIDI. Dependencies: NumPy, SciPy, soundfile, pyloudnorm, mir_eval and
+loudness-matched listening copies, optional per-event excerpts and, with
+`--midi`, the reference's notes as MIDI. An optional event map (CSV or MIDI)
+traces events to bar, beat, part and voice, and `compare.py check` scores the
+detector on a render with known notes. Dependencies: NumPy, SciPy, soundfile, pyloudnorm, mir_eval and
 pretty_midi; prefer these established libraries over new hand-written code.
 Dorico is not required. Windows is the main target platform. Python 3.12 is
 the minimum supported version.
@@ -82,17 +84,36 @@ outputs.
   or confidence below 0.85. `note_scores` adds mir_eval precision, recall and
   F1 (onset ±50 ms, pitch ±50 cents, then also offsets within 20%) after
   removing the same constant offset.
+- **`read_event_map`** reads `--event-map` (CSV with `time_s` and `pitch`,
+  optional `duration_s`, `bar`, `beat`, `part`, `voice`; or MIDI via
+  pretty_midi). **`match_written`** pairs render notes with written events
+  using `mir_eval.transcription.match_notes` (onset ±100 ms, pitch ±50 cents,
+  no offsets). **`trace`** attaches `written`/`written_status` to each row,
+  searches for written-but-undetected render notes between neighbouring
+  render detections and inserts `undetected written event` rows.
+  **`check_detector`** reports missed, merged, extra, split and boundary
+  (onset > 30 ms or end > 100 ms) issues. `compare.py check RENDER EVENTS`
+  (`check_main`) runs it without a reference.
+- Every event row has an `id`, both sides' `*_s`, `*_end_s`, `*_pitch`,
+  `*_confidence` and `*_note` index, and `reasons`.
+- **`write_excerpts`** (with `--excerpts`) writes `excerpts/event-NNN-*.wav`
+  for the flagged events that `selected_flags` picks for the report, using
+  `excerpt_windows` (previous to next matched pair, ±0.25 s) and the
+  `level_match` gain.
 - **`listening_copies`** writes `reference-clip.wav` and
   `render-level-matched.wav` (32-bit float). The gain comes from pyloudnorm LUFS,
   falling back to the RMS gain for clips under 0.4 s or near silence.
   **`write_midi`** (with `--midi`) writes `reference-notes.mid` via pretty_midi,
   with times relative to the range start and pitches rounded to semitones.
 - **`main`** creates a new `outputs/comparison-*/` folder per run (`mkdtemp`)
-  containing `comparison.md` (top `--limit` rows by largest difference),
+  containing `comparison.md` (top `--limit` rows by largest difference, then
+  the flagged events in musical order and the detector check),
   `comparison.json` (every event plus the detected notes) and the optional
   audio and MIDI files above. It prints the `.md`
   path. On invalid input it exits with status 2 and prints
-  `Comparison failed: …`.
+  `Comparison failed: …`. `compare.py check` writes
+  `outputs/detector-check-*/detector-check.{md,json}` and fails with
+  `Detector check failed: …`.
 
 ## Conventions and constraints
 
@@ -105,7 +126,8 @@ outputs.
 - When reviewing results, read `comparison.md` first. Open `comparison.json`
   only when the detail is needed, because it is much larger.
 - The numeric thresholds above are also documented in `docs/how-it-works.md`,
-  `docs/report.md`, `docs/troubleshooting.md` and `docs/testing.md`. Update
+  `docs/report.md`, `docs/troubleshooting.md`, `docs/testing.md`, `docs/usage.md`
+and `docs/validation.md`. Update
   those pages when you change a threshold.
 - `tests/sample_audio.py` defines `REFERENCE_NOTES`, `RENDER_NOTES` and
   `RENDER_OFFSET_S`, which the end-to-end tests use as expected values. Timing

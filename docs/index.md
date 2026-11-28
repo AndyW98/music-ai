@@ -35,10 +35,12 @@ The command prints the path to a new `comparison.md` report. A detailed
 - [Read the report](report.md) explains each column and JSON field.
 - [How it works](how-it-works.md) describes pitch tracking, note matching and the measurements.
 - [Troubleshooting](troubleshooting.md) covers common errors and limitations.
+- [Validate the detector](validation.md) measures what the detector misses on a real Dorico export.
 - [Testing](testing.md) explains how to run the unit tests.
 - [Dependencies](dependencies.md) links to every project the tool relies on.
 
 !!! note "Status"
-    The tool passes its unit tests on synthetic tones. It has not yet
-    been validated on real Dorico exports, so treat the results as a guide
-    for listening rather than a final verdict.
+    The tool passes its unit tests on synthetic tones. Use
+    [Validate the detector](validation.md) to measure it on your own Dorico
+    exports, and treat the results as a guide for listening rather than a
+    final verdict.

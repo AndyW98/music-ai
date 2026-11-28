@@ -5,9 +5,12 @@ known exactly. Run it directly to write a demo pair::
 
     python tests/sample_audio.py samples
 
-which creates ``samples/reference.wav`` and ``samples/render.wav``.
+which creates ``samples/reference.wav`` and ``samples/render.wav``, plus
+``samples/validation-render.wav`` and ``samples/validation-events.csv`` for
+``compare.py check`` (see ``VALIDATION_NOTES``).
 """
 
+import csv
 import sys
 from pathlib import Path
 
@@ -29,6 +32,50 @@ RENDER_NOTES = [
     (1.30 + RENDER_OFFSET_S + .040, .60 + .050, 72 + .25, .9),
     (2.10 + RENDER_OFFSET_S - .030, .60 - .040, 76 - .18, .3),
 ]
+
+# A synthetic stand-in for the detector test score in docs/validation.md:
+# 4/4 at 120 bpm (0.5 s per beat) after a 0.5 s lead-in, one part, one voice.
+# (bar, beat, beats_long, midi_pitch, amplitude, sounding_fraction). A
+# sounding fraction of 1 is slurred (no gap before the next note).
+VALIDATION_BEAT_S = .5
+VALIDATION_LEAD_IN_S = .5
+VALIDATION_SCORE = [
+    # Bar 1: four detached repeated A4 crotchets.
+    (1, 1, 1, 69, 1.0, .8), (1, 2, 1, 69, 1.0, .8), (1, 3, 1, 69, 1.0, .8), (1, 4, 1, 69, 1.0, .8),
+    # Bar 2: four slurred quavers, a crotchet rest, then a crotchet.
+    (2, 1, .5, 72, .8, 1.), (2, 1.5, .5, 74, .8, 1.), (2, 2, .5, 76, .8, 1.), (2, 2.5, .5, 77, .8, .9),
+    (2, 4, 1, 79, .8, .9),
+    # Bar 3: a slurred repeated E5 (no gap, so the detector merges it), then
+    # two quiet notes at about -20 and -26 dB.
+    (3, 1, 1, 76, .8, 1.), (3, 2, 1, 76, .8, .9), (3, 3, 1, 74, .1, .9), (3, 4, 1, 72, .05, .9),
+    # Bar 4: a minim, then a minim rest.
+    (4, 1, 2, 69, .8, .95),
+]
+
+
+def validation_notes():
+    """``(start_s, duration_s, midi_pitch, amplitude)`` for ``VALIDATION_SCORE``."""
+    notes = []
+    for bar, beat, beats, pitch, amp, fraction in VALIDATION_SCORE:
+        start = VALIDATION_LEAD_IN_S + ((bar - 1) * 4 + beat - 1) * VALIDATION_BEAT_S
+        notes.append((start, beats * VALIDATION_BEAT_S * fraction, pitch, amp))
+    return notes
+
+
+def make_validation(folder):
+    """Write ``validation-render.wav`` and its known ``validation-events.csv``."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    notes = validation_notes()
+    total = notes[-1][0] + notes[-1][1] + 1.
+    audio = write_wav(folder / "validation-render.wav", synth(notes, total))
+    events = folder / "validation-events.csv"
+    with events.open("w", newline="", encoding="utf-8") as out:
+        writer = csv.writer(out)
+        writer.writerow(["time_s", "duration_s", "pitch", "bar", "beat", "part", "voice"])
+        for (start, duration, pitch, _), (bar, beat, *_) in zip(notes, VALIDATION_SCORE):
+            writer.writerow([f"{start:.3f}", f"{duration:.3f}", pitch, bar, f"{beat:g}", "Flute", 1])
+    return audio, events
 
 
 def midi_to_hz(midi):
@@ -82,5 +129,5 @@ def make_pair(folder):
 
 if __name__ == "__main__":
     target = Path(sys.argv[1] if len(sys.argv) > 1 else "samples")
-    for path in make_pair(target):
+    for path in (*make_pair(target), *make_validation(target)):
         print(path)

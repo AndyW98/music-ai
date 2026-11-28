@@ -36,6 +36,10 @@ Note match F1
     reference note's length (at least 50 ms). Use it to compare successive
     drafts: higher is better.
 
+Event map
+:   Only with `--event-map`: the map file, its number of written events and
+    the offset added to its times.
+
 Listening copies
 :   The two listening files and the gain applied to the render copy. The gain
     normally matches integrated loudness (LUFS, ITU-R BS.1770). For clips
@@ -50,12 +54,33 @@ or 6 dB.
 
 | Column | Meaning |
 |---|---|
+| # | Event number, counting in musical order. The same number is used in the flagged-events section, the excerpt file names and the JSON `id`. |
 | Reference s / Render s | Note start in each file, in seconds from the start of the file. |
+| Reference note / Render note | The detected pitch on each side, as a note name and cents from it. `A4 +12¢` is A4 12 cents sharp. |
 | Pitch cents | Pitch difference. 100 cents is one semitone. |
 | Attack ms | Attack difference after removing the constant offset. |
 | Duration ms | Difference in note length. |
 | Level dB | Note level difference after the overall RMS gain. |
-| Status | `matched`, `unmatched reference event` or `extra render event`, plus `· review` when flagged. |
+| Written | Only with an event map: the written event's bar, beat, part and voice, or `no mapped written event`. |
+| Status | See below, plus `· review` when flagged. |
+
+The status is one of:
+
+`matched`
+:   A reference note and a render note were paired.
+
+`unmatched reference event`
+:   The reference has a note with no paired render note. With an event map,
+    the Written column says whether the note is **written but not detected
+    in the render**, or whether there is **no mapped written event** at that
+    point.
+
+`extra render event`
+:   The render has a note with no paired reference note.
+
+`undetected written event`
+:   Only with an event map: a written note that neither file's detection
+    accounts for, for example the second of two slurred repeated notes.
 
 ### The review flag
 
@@ -67,8 +92,44 @@ A matched note is marked `review` when any of these is true:
   note than an intonation difference.
 - Tracker confidence for either note is below 0.85.
 
+With an event map, a matched note is also flagged when its render
+detection matches no written event.
+
 The flag is a heuristic hint to listen closely. It does not mean the note is
-wrong.
+wrong. Each flagged event lists its reasons.
+
+### Flagged events in musical order
+
+After the table, the report lists the flagged events in musical order. These
+are the unpaired and `review` events, up to `--limit` of them, chosen by the
+same largest-difference ranking. For each it shows:
+
+- the detected start and end, pitch and confidence on **both** sides, or
+  `no detected render event` with the position where the render note was
+  expected;
+- with an event map, the written location and pitch, and where it came from
+  (a CSV line number or a MIDI track and note number);
+- why it was flagged;
+- with `--excerpts`, links to the two clips, their time ranges in the source
+  files and the gain applied to the render clip.
+
+### Detector check
+
+With an event map, the report ends with a check of the render's detected
+notes against the written notes. A detected note is the written note when its
+attack is within 100 ms and its pitch within 50 cents.
+
+| Kind | Meaning |
+|---|---|
+| `missed` | A written note with no detection. A false negative. |
+| `merged` | A written note that falls inside a detection already matched to another written note, for example a slurred repeated note. A false negative. |
+| `extra` | A detection with no written note. A false positive. |
+| `split` | A detection that starts inside a written note already matched, for example a note broken in two. A false positive. |
+| `boundary` | A matched detection whose attack is more than 30 ms, or whose end is more than 100 ms, away from the written note. |
+
+The summary also gives precision, recall, F1 and the median attack and end
+differences. Sample libraries add attack and release time, so a constant
+median difference is expected and is not a detector error.
 
 ## `comparison.json`
 
@@ -102,6 +163,18 @@ The JSON has the same information plus everything the Markdown leaves out.
 
 - `events` is in **musical order**, unlike the Markdown table. Unmatched
   events have `null` for the missing side and no measurement fields.
+- Each event has an `id` and, for both sides, `reference_s`/`render_s`,
+  `*_end_s`, `*_pitch`, `*_confidence` and `*_note` (the index into that
+  side's `notes` list). `reasons` explains the status or review flag.
+- An unmatched reference event has `expected_render_s`, where its render
+  note would be, estimated from the previous matched pair.
+- `written` is the matching written event (with `time_s`, `end_s`, `pitch`,
+  `bar`, `beat`, `part`, `voice` and `source`) or `null`. `written_status` is
+  `mapped`, `no mapped written event` or `no event map`.
+- With `--excerpts`, flagged events have an `excerpt` with the two files,
+  their `range_s` in each source file, `render_gain_db` and `gain_method`.
+- With an event map, `event_map` holds the written events and
+  `detector_check` the check summary and its `issues`.
 - `onset_ms` is `null` if no pitch-matched pair was found to align on.
 - Each entry in `notes` has `start`, `end` (seconds), `pitch`, `confidence`
   (0 to 1) and `rms`. `pitch` is a fractional MIDI number relative to

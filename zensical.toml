@@ -18,6 +18,7 @@ nav = [
   { "Read the report" = "report.md" },
   { "How it works" = "how-it-works.md" },
   { "Troubleshooting" = "troubleshooting.md" },
+  { "Validate the detector" = "validation.md" },
   { "Testing" = "testing.md" },
   { "Dependencies" = "dependencies.md" },
 ]
