@@ -235,8 +235,10 @@ def segment(frames, hop, stop, candidates=None):
         if merged:
             previous = merged[-1]
             gap = range(previous["frames"][-1] + 1, run[0])
+            previous_pitches = [frames[k][1] for k in previous["frames"]
+                                if frames[k][1] is not None][-5:]
             same = abs(np.median([frames[k][1] for k in run[:5]]) -
-                       np.median([frames[k][1] for k in previous["frames"][-5:]])) * 100 <= SPLIT_CENTS
+                       np.median(previous_pitches)) * 100 <= SPLIT_CENTS
             if 0 < len(gap) <= MAX_BRIDGE_FRAMES and same and all(frames[k][2] > 0 for k in gap):
                 previous["frames"] += [*gap, *run]
                 previous["gaps"].append([frames[gap[0]][0], frames[run[0]][0]])
