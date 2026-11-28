@@ -7,6 +7,34 @@ Dorico, and it never opens or edits a score.
 Full documentation: <https://andyw98.github.io/music-ai/>. New users should
 start with the [first-time setup guide](docs/getting-started.md).
 
+## Audio-to-Dorico skill in ChatGPT desktop (Windows)
+
+The repository includes the [Dorico audio transcription skill](.agents/skills/dorico-audio-transcription/SKILL.md). It guides Codex through an audio-only draft, a readable Dorico score, repeated Dorico WAV exports, and review with this CLI. It creates one new Dorico project for a run, then revises that project; it does not edit projects that existed before the run. Hindsight memory is optional. The skill does not turn this CLI into an automatic polyphonic transcriber: its pitch detector follows one dominant note at a time.
+
+1. Install the [ChatGPT desktop app for Windows](https://learn.chatgpt.com/docs/app/windows), [Dorico](https://www.steinberg.net/dorico/), [Git for Windows](https://git-scm.com/download/win), Python 3.12 or later, and [uv](https://docs.astral.sh/uv/getting-started/installation/) (or use standard `venv`). Sign in to the desktop app. Use its Windows-native agent so it can reach Dorico on the same PC. Check your Dorico version against the integration's supported versions.
+2. Clone this repository with the command below. In ChatGPT desktop, switch to **Codex**, add the cloned `music-ai` folder as a local project, and start a new task there. Codex discovers the checked-in skill from `.agents/skills/`; open **Skills** in the sidebar to confirm it appears. If it does not, restart the app or start a new task. The standalone skill is available in the desktop app's Codex environment; merely pasting the repository URL into an ordinary Chat does not install it.
+
+   ```powershell
+   git clone https://github.com/AndyW98/music-ai.git
+   cd music-ai
+   uv venv .venv
+   uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+   .\.venv\Scripts\python.exe compare.py --help
+   ```
+
+3. Install [Dorico Maestro](https://github.com/romanstark/dorico-maestro) if you want MCP control of Dorico. Its current quick start supports Dorico 4, 5, and 6 and uses `uv tool install git+https://github.com/romanstark/dorico-maestro.git`. Register the installed `dorico-maestro` command as a **local stdio MCP server** for Codex. One option is `codex mcp add dorico-maestro -- dorico-maestro`; alternatively, use the desktop app's MCP settings or add the TOML entry below to `%USERPROFILE%\.codex\config.toml`. Restart the task, open a disposable Dorico project, authorize Dorico's first-connection prompt, and ask for a read-only status check before attempting edits. [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp) and [Maestro's README](https://github.com/romanstark/dorico-maestro#quick-start) have the current details.
+
+   ```toml
+   [mcp_servers.dorico-maestro]
+   command = "dorico-maestro"
+   ```
+
+4. In a new Codex task with an audio file available locally, select **Dorico Audio Transcription** from Skills or ask: “Use `$dorico-audio-transcription` on this recording. Create a new Dorico project, estimate tempo and meter, make a readable draft, export WAV, compare it with the source, and revise the same project. Keep older projects and the source audio unchanged.” Review the proposed score and each reported uncertainty. The agent needs local file, CLI, and Dorico access; permission prompts and the first Dorico authorization may need your input.
+
+To use the skill in a *different* repository, ask Codex's `$skill-installer` to install the skill from `AndyW98/music-ai` at `.agents/skills/dorico-audio-transcription`. Start a new task in that repository afterward. Keep this `music-ai` checkout available to run `compare.py`, and give the agent its path. The skill by itself supplies workflow instructions, not the CLI, Dorico, or Maestro.
+
+You can start or steer a **Codex task with Voice** in the ChatGPT desktop app when Voice is available for your account and workspace. Voice follows that task's tools and permissions. Plain Chat, Work, and Codex have different tool environments; the local repository skill and a local Maestro MCP registration should be tested in the Codex task that will do the work. See [ChatGPT Voice](https://learn.chatgpt.com/docs/features/voice) and [skill discovery](https://learn.chatgpt.com/docs/build-skills). Do not expose the local Dorico MCP connection to the public internet.
+
 ## Windows setup
 
 ```powershell

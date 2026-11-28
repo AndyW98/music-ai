@@ -14,6 +14,7 @@ nav = [
   { "Home" = "index.md" },
   { "First-time setup" = "getting-started.md" },
   { "Install on Windows" = "install.md" },
+  { "Dorico transcription skill" = "dorico-skill.md" },
   { "Run a comparison" = "usage.md" },
   { "Read the report" = "report.md" },
   { "How it works" = "how-it-works.md" },

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dorico Audio Transcription"
+  short_description: "Turn audio into a reviewed, editable Dorico score"
+  default_prompt: "Use $dorico-audio-transcription to transcribe this recording into a new Dorico project and compare a fresh export with the original."
