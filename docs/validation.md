@@ -67,12 +67,20 @@ look.
 
 ## What to expect
 
-The synthetic version of this score in `tests/sample_audio.py`
-(`VALIDATION_SCORE`) gives one false negative: the second slurred E5 in bar 3
-is **merged** into the first, because nothing in the pitch track marks the
-new attack. Its first E5 is also reported as a boundary error, because the
-merged detection ends with the second note. Everything else is detected,
-including the *ppp* note. Try it with:
+`tests/sample_audio.py` has a synthetic version of this score
+(`VALIDATION_SCORE`). Its slurred repeated E5 has a brief level dip where it
+is played again. Its bar 4 minim has a 60 ms breath-like noise dropout, a
+known cause of false splits in recordings. The current detector finds every
+written note exactly once, including the *ppp* note. The earlier detector,
+which split notes only at unpitched frames and pitch jumps, made one error of
+each kind on the same file:
+
+| Detector | Matched | Merged | Split | Boundary errors | F1 |
+|---|--:|--:|--:|--:|--:|
+| Earlier (unpitched frame or 65-cent jump only) | 13 of 14 | 1 (bar 3 beat 2) | 1 (bar 4 beat 1) | 2 | 0.93 |
+| Current (with gap bridging and reattacks) | 14 of 14 | 0 | 0 | 0 | 1.00 |
+
+Try it with:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\sample_audio.py samples

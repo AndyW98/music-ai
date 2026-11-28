@@ -39,8 +39,24 @@ about **120 Hz and 2400 Hz**. Then:
 
 Consecutive pitched frames form a note. A note ends when a frame is unpitched,
 or when the pitch moves more than **65 cents** away from the median of the
-previous five frames. Notes shorter than **55 ms** are discarded. Each note's
-pitch is the median of its frames, so vibrato averages out.
+previous five frames. Pitch stability and attack evidence are then weighed
+together:
+
+- **Voicing gaps are bridged.** Up to **three** unpitched frames (30 ms) are
+  joined into the surrounding note when they are audible but not periodic,
+  such as a breath or a tracker dropout, and the pitch on both sides agrees
+  within 65 cents. Silent frames, below the level gate, always end a note.
+- **Reattacks split a note.** A stable note is split where its level dips at
+  least **6 dB** below the loudest frame of the previous 100 ms and rises at
+  least 6 dB within the next 50 ms, while the tone stays clearly pitched
+  (confidence **0.85** or more). This catches a slurred repeated note. Breath
+  and noise lower the confidence, and vibrato or a slow swell does not dip
+  that far, so they do not split a note.
+
+Notes shorter than **55 ms** are not used, but they are kept in the JSON as
+`candidates` with the reason. Each note records why it starts
+(`start_reason`) and any bridged `gaps`. Each note's pitch is the median of
+its pitched frames, so vibrato averages out.
 
 ## 4. Caching
 
@@ -85,9 +101,27 @@ note error can all produce an unmatched event. Audio is never stretched.
   render clip gets the listening copy's gain.
 - With `--midi`, [pretty_midi](https://github.com/craffel/pretty-midi) writes
   the reference's detected notes to a MIDI file. MIDI velocity is 100 for the
-  loudest note, minus 2 per dB quieter, with a minimum of 20.
+  loudest note, minus 2 per dB quieter, with a minimum of 20. Every
+  detected note is written unless you ask for a filter
+  (`--midi-min-confidence`, `--midi-skip-out-of-range`). The report counts
+  the notes left out and the JSON lists each one with its reason. Candidates
+  shorter than 55 ms are never written.
 
-## 8. Tracing events to the score
+## 8. Suspect pitches
+
+Detected notes are checked for likely octave errors and out-of-range pitches.
+Each finding is a **review flag** with its reason and the pitch evidence. No
+note is ever removed or changed.
+
+| Flag | When |
+|---|---|
+| `octave_leap` | A note is an octave (or two), within 50 cents, from both of its neighbours on the same side, in the same direction. |
+| `octave_counterpart` | An unmatched reference event and an extra render event are next to each other, within 100 ms of the same place and an octave apart. Alignment never pairs notes more than 300 cents apart, so an octave error shows up this way. |
+| `octave_written` | With an event map: a note has no written event at its pitch, but there is one an octave away within 100 ms. |
+| `instrument_range` | With `--instrument-range`: a note is more than 50 cents outside the range. |
+| `tracker_limit` | A note is within a semitone of the tracker's 120 Hz or 2400 Hz limit, where octave errors are more likely. |
+
+## 9. Tracing events to the score
 
 With `--event-map`, each detected render note is paired with a written note
 using mir_eval's `transcription.match_notes`: attacks within **100 ms** and

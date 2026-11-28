@@ -63,8 +63,11 @@ outputs.
   120–2400 Hz. It returns frames `[time_s, pitch|None, confidence, rms]`.
   Times are absolute seconds in the file, not relative to the selected range.
 - **`segment`** splits notes on unpitched frames or a jump of more than 65 cents.
-  It drops notes shorter than 55 ms. Pitches are fractional MIDI numbers
-  (A4 = 69).
+  It bridges up to 3 audible unpitched frames (confidence > 0) at the same
+  pitch, and splits stable notes at `reattacks` (RMS dip and rise of 6 dB or
+  more at confidence 0.85 or more). Notes shorter than 55 ms are kept as
+  `candidates`, not notes. Each `Note` has `start_reason` and `gaps`. Pitches
+  are fractional MIDI numbers (A4 = 69).
 - **`read_audio`** uses soundfile (libsndfile) and raises `ValueError` for
   unreadable files, so the CLI reports them as `Comparison failed`.
 - **`analyze`** caches its result as JSON in `work/cache/`. The cache key is a
@@ -94,6 +97,12 @@ outputs.
   **`check_detector`** reports missed, merged, extra, split and boundary
   (onset > 30 ms or end > 100 ms) issues. `compare.py check RENDER EVENTS`
   (`check_main`) runs it without a reference.
+- **`flag_pitches`** adds `pitch_flags` (octave_leap, octave_counterpart,
+  octave_written, instrument_range, tracker_limit) with evidence. It only
+  flags rows; it never removes notes. `--instrument-range LOW HIGH` sets the range.
+- **`write_midi`** writes every note unless `--midi-min-confidence` or
+  `--midi-skip-out-of-range` is given, and returns the excluded notes for the
+  report (`midi_selection` checks them before the output folder is made).
 - Every event row has an `id`, both sides' `*_s`, `*_end_s`, `*_pitch`,
   `*_confidence` and `*_note` index, and `reasons`.
 - **`write_excerpts`** (with `--excerpts`) writes `excerpts/event-NNN-*.wav`

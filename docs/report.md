@@ -36,6 +36,17 @@ Note match F1
     reference note's length (at least 50 ms). Use it to compare successive
     drafts: higher is better.
 
+Reference notes as MIDI
+:   Only with `--midi`: how many of the detected notes were written and how
+    many the MIDI filters left out.
+
+Candidates
+:   How many fragments shorter than 55 ms were found on each side. They are
+    not used as notes, but are kept in the JSON.
+
+Instrument range
+:   Only with `--instrument-range`. Out-of-range notes are flagged, not removed.
+
 Event map
 :   Only with `--event-map`: the map file, its number of written events and
     the offset added to its times.
@@ -93,7 +104,9 @@ A matched note is marked `review` when any of these is true:
 - Tracker confidence for either note is below 0.85.
 
 With an event map, a matched note is also flagged when its render
-detection matches no written event.
+detection matches no written event. Any [suspect pitch](how-it-works.md#8-suspect-pitches)
+(a likely octave error, or a note outside `--instrument-range` or near the
+tracker's limits) also flags it.
 
 The flag is a heuristic hint to listen closely. It does not mean the note is
 wrong. Each flagged event lists its reasons.
@@ -171,13 +184,21 @@ The JSON has the same information plus everything the Markdown leaves out.
 - `written` is the matching written event (with `time_s`, `end_s`, `pitch`,
   `bar`, `beat`, `part`, `voice` and `source`) or `null`. `written_status` is
   `mapped`, `no mapped written event` or `no event map`.
+- `pitch_flags` lists suspect pitches. Each has a `kind`, the `side` it
+  applies to, a `reason` and the pitch `evidence` (for example the
+  neighbouring pitches, the interval in cents, or the written event).
 - With `--excerpts`, flagged events have an `excerpt` with the two files,
   their `range_s` in each source file, `render_gain_db` and `gain_method`.
 - With an event map, `event_map` holds the written events and
   `detector_check` the check summary and its `issues`.
 - `onset_ms` is `null` if no pitch-matched pair was found to align on.
 - Each entry in `notes` has `start`, `end` (seconds), `pitch`, `confidence`
-  (0 to 1) and `rms`. `pitch` is a fractional MIDI number relative to
+  (0 to 1), `rms`, `start_reason` (`first pitched frame`, a pitch change or a
+  reattack, with its numbers) and `gaps` (bridged unpitched gaps, in seconds).
+- `candidates` on each side lists fragments too short to be notes, with
+  `start`, `end`, `pitch`, `confidence` and `reason`.
+- `midi` (with `--midi`) gives the `file`, the number of notes `written` and
+  `detected`, the `filters` used and every `excluded` note with its reason. `pitch` is a fractional MIDI number relative to
   A440. For example, `69.25` is A4 25 cents sharp.
 
 ## Interpreting the numbers
