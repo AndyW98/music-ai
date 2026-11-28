@@ -40,6 +40,9 @@ outputs\comparison-ab12cd34\comparison.md
 | `--cache DIR` | `work/cache` | Folder for cached analysis. |
 | `--output DIR` | `outputs` | Folder in which each run creates a new report folder. |
 | `--no-listening-copy` | off | Skip writing the two listening WAVs. |
+| `--excerpts` | off | Write short level-matched clips for each flagged event shown in the report. See [Listen to flagged events](#listen-to-flagged-events). |
+| `--event-map FILE` | none | A CSV or MIDI file of the render's written notes. Events are then located by bar, beat, part and voice. See [Locate events in the score](#locate-events-in-the-score). |
+| `--event-map-offset SECONDS` | `0` | Added to every time in the event map, for example when the WAV starts later than the map. |
 | `--midi` | off | Also write the reference's detected notes as `reference-notes.mid`. |
 | `--midi-program N` | `73` (Flute) | General MIDI instrument for `--midi`, 0–127. |
 
@@ -73,12 +76,96 @@ containing:
 - `reference-clip.wav`: the selected reference range, unchanged.
 - `render-level-matched.wav`: the selected render range, turned up or down so
   its loudness (LUFS) matches the reference. Both are 32-bit float WAVs.
+- `excerpts/` (only with `--excerpts`): `event-NNN-reference.wav` and
+  `event-NNN-render.wav` for each flagged event in the report. `NNN` is the
+  event number used in the report and the JSON.
 - `reference-notes.mid` (only with `--midi`): the reference's notes as MIDI,
   starting at 0 s at the start of the selected range. Pitches are rounded to
   the nearest semitone and velocity follows each note's level. The rhythm is
   not quantized. Import it into a **new** Dorico project as a starting draft.
 
 Earlier reports are never overwritten.
+
+## Locate events in the score
+
+An **event map** lists the written notes of the render, so each detected
+event can be traced to a bar, beat, part and voice in Dorico. It is optional.
+Without one, comparisons work as before.
+
+Pass a CSV file or a MIDI file:
+
+```powershell
+.\.venv\Scripts\python.exe compare.py take3.wav dorico.wav --event-map dorico-notes.csv
+```
+
+**CSV.** One row per written note. `time_s` and `pitch` are required. The
+other columns are optional and can be left blank:
+
+| Column | Meaning |
+|---|---|
+| `time_s` | When the note starts, in seconds from the start of the **render file**. |
+| `pitch` | A MIDI number (`69`, or `69.5` for a quarter tone) or a note name such as `A4`, `C#5` or `Bb3`. Middle C is `C4`. |
+| `duration_s` | Written length in seconds. The detector check needs it to judge note ends. |
+| `bar`, `beat` | Position in the score. Beats count from 1 and may be fractional (`2.5`). |
+| `part`, `voice` | Text, for example `Flute` and `1`. |
+
+```text
+time_s,pitch,duration_s,bar,beat,part,voice
+0.500,A4,0.400,1,1,Flute,1
+1.000,A4,0.400,1,2,Flute,1
+```
+
+Column names are not case-sensitive. A file saved by Excel with a byte order
+mark also works.
+
+**MIDI.** A MIDI export of the same passage from Dorico (**File → Export →
+MIDI**) supplies times, pitches and durations. The part name comes from each
+track's name. Bars and beats are counted from the MIDI file's time signatures
+and tempo, starting at bar 1 at the start of the file. With a pickup bar, or
+when the exported passage does not start at bar 1, they will not match
+Dorico's bar numbers. The beat follows
+[pretty_midi](https://github.com/craffel/pretty-midi): compound meters such as
+6/8 count dotted beats. MIDI has no voices, and drum tracks are skipped.
+
+Check that the map and the WAV start at the same moment. If the WAV has
+silence before the first note that the map does not, pass the difference with
+`--event-map-offset`.
+
+With a map, the report has a **Written** column, a written location for each
+flagged event and a [detector check](report.md#detector-check). Each
+unmatched event then says either that the note **is written but was not
+detected in the render**, or that there is **no mapped written event** for it.
+
+## Listen to flagged events
+
+`--excerpts` writes a pair of short clips for each flagged event listed in
+the report's *Flagged events in musical order* section:
+
+```powershell
+.\.venv\Scripts\python.exe compare.py take3.wav dorico.wav --excerpts
+```
+
+Each clip runs from the start of the previous matched note pair to the end of
+the next one, plus 0.25 s on each side, so both clips cover the same notes. The
+render clip gets the same gain as `render-level-matched.wav`. The report
+links each clip and gives its time range in the source file and the gain
+used. The JSON has the same details in each event's `excerpt` field.
+
+## Check the detector
+
+To find out what the note detector misses on a real Dorico export, run
+`check` on a render whose written notes you know:
+
+```powershell
+.\.venv\Scripts\python.exe compare.py check dorico.wav dorico-notes.csv
+```
+
+It needs no reference recording. It prints the path of a new
+`detector-check.md` with a `detector-check.json` next to it. The report lists
+false negatives, false positives and boundary errors with their bar and beat.
+`check` takes `--render-start`, `--render-end`, `--event-map-offset`,
+`--cache` and `--output`. See [Validate the detector](validation.md) for a
+test score to render.
 
 ## Caching
 
@@ -104,5 +191,6 @@ questions. This keeps the conversation short.
 ## Exit status
 
 `0` means a report was written. `2` means bad input, for example an invalid
-range, a missing or unreadable file, silence, or no stable notes. In that case a
-one-line `Comparison failed: …` message is printed and no report is written.
+range or event map, a missing or unreadable file, silence, or no stable notes.
+In that case a one-line `Comparison failed: …` message (`Detector check
+failed: …` for `check`) is printed and no report is written.

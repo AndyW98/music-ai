@@ -12,7 +12,10 @@ flowchart LR
   E --> F[align reference and render notes]
   F --> G[compare: cents, ms, dB]
   G --> H[comparison.json and comparison.md]
-  G --> I[listening copies and MIDI]
+  G --> I[listening copies, excerpts and MIDI]
+  M[(optional event map)] --> J[trace to written events]
+  F --> J
+  J --> G
 ```
 
 ## 1. Reading audio
@@ -76,6 +79,28 @@ note error can all produce an unmatched event. Audio is never stretched.
 - [pyloudnorm](https://github.com/csteinmetz1/pyloudnorm) measures each clip's
   integrated loudness (ITU-R BS.1770). The render copy gets the gain that makes
   the two equal. Clips too short to measure (under 0.4 s) use the RMS gain instead.
+- With `--excerpts`, each flagged event in the report gets a reference clip
+  and a render clip. Both run from the start of the previous matched pair to
+  the end of the next one, plus 0.25 s, so they cover the same notes. The
+  render clip gets the listening copy's gain.
 - With `--midi`, [pretty_midi](https://github.com/craffel/pretty-midi) writes
   the reference's detected notes to a MIDI file. MIDI velocity is 100 for the
   loudest note, minus 2 per dB quieter, with a minimum of 20.
+
+## 8. Tracing events to the score
+
+With `--event-map`, each detected render note is paired with a written note
+using mir_eval's `transcription.match_notes`: attacks within **100 ms** and
+pitch within **50 cents**, with note ends ignored. Each pairing is one-to-one.
+
+- A row with a render detection takes that detection's written note, if any.
+  A matched pair whose render note has no written note is flagged for review.
+- A reference note with no render detection looks for an unused written note
+  at the same pitch (within 50 cents) between the neighbouring render
+  detections. If there is one, the note is written but was not detected in the
+  render. Otherwise there is no mapped written event for it.
+- Written notes still unused become `undetected written event` rows.
+
+The same pairing drives the [detector check](report.md#detector-check). A
+matched detection counts as a boundary error when its attack is more than
+**30 ms** or its end more than **100 ms** from the written note.

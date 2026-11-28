@@ -26,7 +26,11 @@ all note matches and unmatched events as JSON alongside it. The same folder
 gets `reference-clip.wav` and `render-level-matched.wav`, loudness-matched
 copies for A/B listening (skip them with `--no-listening-copy`). Add `--midi`
 to also write the reference's detected notes as `reference-notes.mid`, which
-can be imported into Dorico as a first draft. For a spoken
+can be imported into Dorico as a first draft. Add `--event-map` with a CSV
+or a Dorico MIDI export of the render's notes to locate each event by bar,
+beat, part and voice, and `--excerpts` to write short level-matched clips
+of each flagged event. `compare.py check render.wav notes.mid` measures what
+the note detector misses on a render with known notes. For a spoken
 request through Codex, ask it to run the command against the two WAVs and
 read the Markdown report. The full JSON is available for follow-up questions.
 The cache in `work/cache/` stores the full pitch and RMS tracks keyed by
@@ -40,7 +44,8 @@ audio content and selected time range.
 ```
 
 The render is altered by about +25 and −18 cents, +40 and −30 ms attack, and
-+50 and −40 ms duration on notes 2 and 3.
++50 and −40 ms duration on notes 2 and 3. The script also writes
+`validation-render.wav` and `validation-events.csv` for `compare.py check`.
 
 ## Reading the report
 
