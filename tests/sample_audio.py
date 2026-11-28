@@ -35,30 +35,37 @@ RENDER_NOTES = [
 
 # A synthetic stand-in for the detector test score in docs/validation.md:
 # 4/4 at 120 bpm (0.5 s per beat) after a 0.5 s lead-in, one part, one voice.
-# (bar, beat, beats_long, midi_pitch, amplitude, sounding_fraction). A
-# sounding fraction of 1 is slurred (no gap before the next note).
+# (bar, beat, beats_long, midi_pitch, amplitude, sounding_fraction, fade_s). A
+# sounding fraction of 1 is slurred (no gap before the next note). The fade is
+# each note's attack and release ramp; 40 ms on the slurred repeated E5 models
+# the brief level dip a sample library plays when it re-articulates a note.
 VALIDATION_BEAT_S = .5
 VALIDATION_LEAD_IN_S = .5
 VALIDATION_SCORE = [
     # Bar 1: four detached repeated A4 crotchets.
-    (1, 1, 1, 69, 1.0, .8), (1, 2, 1, 69, 1.0, .8), (1, 3, 1, 69, 1.0, .8), (1, 4, 1, 69, 1.0, .8),
+    (1, 1, 1, 69, 1.0, .8, .01), (1, 2, 1, 69, 1.0, .8, .01), (1, 3, 1, 69, 1.0, .8, .01),
+    (1, 4, 1, 69, 1.0, .8, .01),
     # Bar 2: four slurred quavers, a crotchet rest, then a crotchet.
-    (2, 1, .5, 72, .8, 1.), (2, 1.5, .5, 74, .8, 1.), (2, 2, .5, 76, .8, 1.), (2, 2.5, .5, 77, .8, .9),
-    (2, 4, 1, 79, .8, .9),
-    # Bar 3: a slurred repeated E5 (no gap, so the detector merges it), then
-    # two quiet notes at about -20 and -26 dB.
-    (3, 1, 1, 76, .8, 1.), (3, 2, 1, 76, .8, .9), (3, 3, 1, 74, .1, .9), (3, 4, 1, 72, .05, .9),
-    # Bar 4: a minim, then a minim rest.
-    (4, 1, 2, 69, .8, .95),
+    (2, 1, .5, 72, .8, 1., .01), (2, 1.5, .5, 74, .8, 1., .01), (2, 2, .5, 76, .8, 1., .01),
+    (2, 2.5, .5, 77, .8, .9, .01), (2, 4, 1, 79, .8, .9, .01),
+    # Bar 3: a slurred repeated E5 (no gap, only a level dip), then two quiet
+    # notes at about -20 and -26 dB.
+    (3, 1, 1, 76, .8, 1., .04), (3, 2, 1, 76, .8, .9, .04), (3, 3, 1, 74, .1, .9, .01),
+    (3, 4, 1, 72, .05, .9, .01),
+    # Bar 4: a minim with a 60 ms breath-like noise dropout at beat 2, then a
+    # minim rest.
+    (4, 1, 2, 69, .8, .95, .01),
 ]
+# (start_s, duration_s, noise_rms) bursts that replace the tone.
+VALIDATION_DROPOUTS = [(VALIDATION_LEAD_IN_S + 13 * VALIDATION_BEAT_S, .06, .05)]
 
 
 def validation_notes():
-    """``(start_s, duration_s, midi_pitch, amplitude)`` for ``VALIDATION_SCORE``."""
+    """``(start_s, duration_s, midi_pitch, amplitude, fade_s)`` for ``VALIDATION_SCORE``."""
     notes = []
-    for bar, beat, beats, pitch, amp, fraction in VALIDATION_SCORE:
+    for bar, beat, beats, pitch, amp, fraction, fade in VALIDATION_SCORE:
         start = VALIDATION_LEAD_IN_S + ((bar - 1) * 4 + beat - 1) * VALIDATION_BEAT_S
-        notes.append((start, beats * VALIDATION_BEAT_S * fraction, pitch, amp))
+        notes.append((start, beats * VALIDATION_BEAT_S * fraction, pitch, amp, fade))
     return notes
 
 
@@ -68,12 +75,13 @@ def make_validation(folder):
     folder.mkdir(parents=True, exist_ok=True)
     notes = validation_notes()
     total = notes[-1][0] + notes[-1][1] + 1.
-    audio = write_wav(folder / "validation-render.wav", synth(notes, total))
+    audio = write_wav(folder / "validation-render.wav",
+                      synth(notes, total, dropouts=VALIDATION_DROPOUTS))
     events = folder / "validation-events.csv"
     with events.open("w", newline="", encoding="utf-8") as out:
         writer = csv.writer(out)
         writer.writerow(["time_s", "duration_s", "pitch", "bar", "beat", "part", "voice"])
-        for (start, duration, pitch, _), (bar, beat, *_) in zip(notes, VALIDATION_SCORE):
+        for (start, duration, pitch, *_), (bar, beat, *_) in zip(notes, VALIDATION_SCORE):
             writer.writerow([f"{start:.3f}", f"{duration:.3f}", pitch, bar, f"{beat:g}", "Flute", 1])
     return audio, events
 
@@ -83,21 +91,29 @@ def midi_to_hz(midi):
     return 440 * 2 ** ((midi - 69) / 12)
 
 
-def synth(notes, total_s, gain=1.0, rate=RATE):
+def synth(notes, total_s, gain=1.0, rate=RATE, dropouts=()):
     """Return float samples (about -1..1) containing ``notes``.
 
-    Each note is a fundamental plus a quieter second harmonic with 10 ms
-    linear fades to avoid clicks.
+    Each note is ``(start_s, duration_s, midi_pitch, amplitude)`` with an
+    optional fifth ``fade_s`` (default 10 ms). It is a fundamental plus a
+    quieter second harmonic with linear fades to avoid clicks. Each
+    ``(start_s, duration_s, noise_rms)`` in ``dropouts`` replaces the signal
+    with seeded white noise, like a breath.
     """
     out = np.zeros(int(total_s * rate))
-    for start, duration, midi, amp in notes:
+    for start, duration, midi, amp, *fade in notes:
+        fade = fade[0] if fade else .01
         n = int(duration * rate)
         t = np.arange(n) / rate
         freq = midi_to_hz(midi)
-        envelope = np.minimum(1, np.minimum(t / .01, (duration - t) / .01))
+        envelope = np.minimum(1, np.minimum(t / fade, (duration - t) / fade))
         first = int(start * rate)
         out[first:first + n] += amp * envelope * (
             np.sin(2 * np.pi * freq * t) + .3 * np.sin(4 * np.pi * freq * t))
+    noise = np.random.default_rng(0)
+    for start, duration, level in dropouts:
+        first, n = int(start * rate), int(duration * rate)
+        out[first:first + n] = noise.normal(0, level / .6, n)
     return out * gain * .6
 
 

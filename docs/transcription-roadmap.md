@@ -14,6 +14,8 @@ Bach's Sarabande is one validation example. Three audio-only renders scored 0.20
 
 ## Epic 2 — Improve pitch and note boundaries
 
+**Status: done.** Suspect-pitch flags and `--instrument-range` (2.1), gap bridging and reattack splitting with regression cases (2.2), and `candidates`, note `start_reason` and explicit MIDI filters (2.3). See [How it works](how-it-works.md#3-segmenting-into-notes).
+
 - **2.1 — Flag suspect pitches.** As a transcriber, I want to review likely octave errors and out-of-range detections. **Acceptance:** Report the reason and supporting pitch evidence for each flag. An optional instrument range raises a review flag. It does not silently discard notes or alter the score.
 - **2.2 — Separate attacks from fluctuations within a note.** As a transcriber, I want to distinguish a genuine reattack from vibrato, a brief voicing gap, or a breath. **Acceptance:** Evaluate pitch stability and attack evidence together. Add regression cases for false splits and legato same-pitch reattacks. Report split and merge errors against the existing detector.
 - **2.3 — Preserve uncertain events for review.** As a reviewer, I want to see what the detector is unsure about before importing MIDI. **Acceptance:** Retain raw candidates and reasons in JSON. Make any MIDI filtering explicit and report what it excluded.

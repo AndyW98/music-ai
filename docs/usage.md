@@ -45,6 +45,9 @@ outputs\comparison-ab12cd34\comparison.md
 | `--event-map-offset SECONDS` | `0` | Added to every time in the event map, for example when the WAV starts later than the map. |
 | `--midi` | off | Also write the reference's detected notes as `reference-notes.mid`. |
 | `--midi-program N` | `73` (Flute) | General MIDI instrument for `--midi`, 0–127. |
+| `--midi-min-confidence C` | none | Leave notes with tracker confidence below `C` (0–1) out of the MIDI file. |
+| `--midi-skip-out-of-range` | off | Leave notes outside `--instrument-range` out of the MIDI file. |
+| `--instrument-range LOW HIGH` | none | The instrument's lowest and highest pitch, as note names or MIDI numbers, for example `C4 D7`. Notes outside it are flagged for review. They are never removed from the report. |
 
 Times are in seconds and may be fractional, for example `--reference-start 2.5`.
 Starts must be 0 or more, and each end must be later than its start.
@@ -83,6 +86,11 @@ containing:
   starting at 0 s at the start of the selected range. Pitches are rounded to
   the nearest semitone and velocity follows each note's level. The rhythm is
   not quantized. Import it into a **new** Dorico project as a starting draft.
+  Every detected note is included unless you add `--midi-min-confidence` or
+  `--midi-skip-out-of-range`. The report says how many notes the filters left
+  out, and the JSON lists each with its reason. Fragments shorter than 55 ms
+  are never notes, so they are never written. They are listed as
+  `candidates` in the JSON.
 
 Earlier reports are never overwritten.
 

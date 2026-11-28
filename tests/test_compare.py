@@ -156,13 +156,69 @@ class TestSegment:
         assert notes[1].end == pytest.approx(.4)
 
     def test_unpitched_gap_splits_repeated_notes(self):
+        # Silent frames (confidence 0, below the level gate) always end a note.
         notes = compare.segment(frames_for([69.] * 10 + [None] * 3 + [69.] * 10), .01, .23)
         assert len(notes) == 2
         assert notes[1].start == pytest.approx(.13)
+        assert notes[1].start_reason == "first pitched frame"
 
     def test_notes_shorter_than_55_ms_are_dropped(self):
-        notes = compare.segment(frames_for([69.] * 5 + [None] + [72.] * 6), .01, .12)
+        candidates = []
+        notes = compare.segment(frames_for([69.] * 5 + [None] + [72.] * 6), .01, .12, candidates)
         assert [round(n.pitch) for n in notes] == [72]
+        (dropped,) = candidates
+        assert dropped["pitch"] == 69 and dropped["reason"] == "shorter than 55 ms"
+        assert (dropped["start"], dropped["end"]) == (0, pytest.approx(.05))
+
+    def test_pitch_change_reason(self):
+        notes = compare.segment(frames_for([69.] * 10 + [70.] * 10), .01, .2)
+        assert notes[1].start_reason == "pitch change of +100 cents"
+
+    @pytest.mark.parametrize("gap", [1, 3])
+    def test_audible_unpitched_gap_is_bridged(self, gap):
+        # A breath or tracker dropout: unpitched but audible (confidence > 0).
+        frames = frames_for([69.] * 10 + [None] * gap + [69.] * 10)
+        for frame in frames[10:10 + gap]:
+            frame[2] = .4
+        (n,) = compare.segment(frames, .01, (20 + gap) / 100)
+        assert n.start == 0 and n.end == pytest.approx((20 + gap) / 100)
+        assert n.gaps == [[pytest.approx(.1), pytest.approx(.1 + gap / 100)]]
+        assert n.pitch == 69
+
+    def test_long_or_different_pitch_gap_is_not_bridged(self):
+        long_gap = frames_for([69.] * 10 + [None] * 4 + [69.] * 10)
+        moved = frames_for([69.] * 10 + [None] * 2 + [70.] * 10)
+        for frames in (long_gap, moved):
+            for frame in frames:
+                if frame[1] is None:
+                    frame[2] = .4
+            assert len(compare.segment(frames, .01, len(frames) / 100)) == 2
+
+    def legato(self, confidence=.95, dip=.25):
+        frames = frames_for([76.] * 40)
+        for k, frame in enumerate(frames):
+            frame[3] = .1 * (1 - (1 - dip) * max(0, 1 - abs(k - 20) / 4))
+        frames[20][2] = confidence
+        return frames
+
+    def test_reattack_splits_a_stable_note(self):
+        first, second = compare.segment(self.legato(), .01, .4)
+        assert first.end == second.start == pytest.approx(.2)
+        assert second.start_reason.startswith("reattack: level dipped 12.0 dB")
+
+    def test_dip_without_clear_pitch_or_too_shallow_does_not_split(self):
+        assert len(compare.segment(self.legato(confidence=.8), .01, .4)) == 1
+        assert len(compare.segment(self.legato(dip=.6), .01, .4)) == 1  # 4.4 dB
+
+    def test_reattack_too_close_to_note_edge_is_ignored(self):
+        frames = self.legato()[15:]  # the dip is 5 frames from the start
+        assert len(compare.segment(frames, .01, .25)) == 1
+
+    def test_tremolo_vibrato_stays_one_note(self):
+        vibrato = frames_for(list(69 + .3 * np.sin(np.arange(60) / 3)))
+        for k, frame in enumerate(vibrato):
+            frame[3] = .1 * (1 + .12 * np.sin(k / 3))  # about 2 dB of tremolo
+        assert len(compare.segment(vibrato, .01, .6)) == 1
 
     def test_vibrato_stays_one_note(self):
         vibrato = list(69 + .3 * np.sin(np.arange(60) / 3))
@@ -193,7 +249,7 @@ class TestAnalyze:
         starts = [n["start"] for n in data["notes"]]
         np.testing.assert_allclose(starts, [.49, 1.29, 2.09], atol=.011)
         assert data["range"] == [0., pytest.approx(3.2)]
-        assert set(data) == {"range", "peak", "rms", "frames", "notes"}
+        assert set(data) == {"range", "peak", "rms", "frames", "notes", "candidates"}
 
     def test_second_call_hits_cache_with_same_data(self, pair, tmp_path):
         first, _ = compare.analyze(pair[0], 0., None, tmp_path / "cache")
@@ -265,6 +321,27 @@ class TestAnalyze:
         compare.analyze(pair[0], 0., None, tmp_path / "cache")
         monkeypatch.setattr(compare, "CACHE_VERSION", "test-bump")
         assert compare.analyze(pair[0], 0., None, tmp_path / "cache")[1] is False
+
+    def test_candidates_are_kept(self, tmp_path):
+        audio = sa.synth([(.1, .015, 72, 1), (.5, .5, 69, 1)], 1.2)
+        path = sa.write_wav(tmp_path / "blip.wav", audio)
+        data, _ = compare.analyze(path, 0., None, tmp_path / "cache")
+        assert [round(n["pitch"]) for n in data["notes"]] == [69]
+        assert [round(c["pitch"]) for c in data["candidates"]] == [72]
+        assert data["candidates"][0]["reason"] == "shorter than 55 ms"
+
+    @pytest.mark.parametrize("case, expected", [
+        ("legato", [76, 76]), ("breath", [69]), ("silence", [69, 69]),
+    ])
+    def test_boundary_regressions_on_audio(self, tmp_path, case, expected):
+        if case == "legato":
+            audio = sa.synth([(.5, .5, 76, .8, .04), (1., .5, 76, .8, .04)], 2.)
+        else:
+            audio = sa.synth([(.5, 1., 69, .8)], 2.,
+                             dropouts=[(.95, .06, .05 if case == "breath" else 0.)])
+        path = sa.write_wav(tmp_path / f"{case}.wav", audio, dtype="float32")
+        data, _ = compare.analyze(path, 0., None, tmp_path / "cache")
+        assert [round(n["pitch"]) for n in data["notes"]] == expected
 
     def test_only_blips_gives_no_notes_error(self, tmp_path):
         # 15 ms tones stay under the 55 ms minimum even after the 40 ms
@@ -762,12 +839,15 @@ class TestDetectorCheck:
         mapped = compare.read_event_map(events)
         result = self.check(notes, mapped)
         assert result["written_events"] == len(sa.VALIDATION_SCORE)
-        # Every note is found except the slurred repeated E5, which merges.
-        assert result["merged_count"] == 1 and result["missed_count"] == 0
-        assert result["extra_count"] == result["split_count"] == 0
-        merged = next(i for i in result["issues"] if i["kind"] == "merged")
-        assert (merged["written"]["bar"], merged["written"]["beat"]) == (3, 2)
+        # The slurred repeated E5 is split at its reattack and the breath in
+        # the bar 4 minim is bridged, so every written note is found once.
+        assert result["issues"] == []
+        assert result["recall"] == result["precision"] == 1
         assert abs(result["median_onset_ms"]) <= 11
+        second = next(n for n in notes if abs(n.start - 5.) < .02)
+        assert second.start_reason.startswith("reattack")
+        minim = next(n for n in notes if abs(n.start - 6.5) < .02)
+        assert len(minim.gaps) == 1
 
 
 class TestExcerpts:
@@ -823,9 +903,10 @@ class TestEventMapCommandLine:
         report = tmp_path / proc.stdout.strip()
         assert report.name == "detector-check.md"
         result = json.loads((report.parent / "detector-check.json").read_text(encoding="utf-8"))
-        assert result["detector_check"]["merged_count"] == 1
+        assert result["detector_check"]["recall"] == 1
+        assert "candidates" in result["render"]
         text = report.read_text(encoding="utf-8")
-        assert "1 merged" in text and "bar 3 beat 2" in text
+        assert "0 merged" in text and "0 split" in text
 
     @pytest.mark.parametrize("args, message", [
         (["--event-map", "missing.csv"], "Comparison failed"),
@@ -840,3 +921,99 @@ class TestEventMapCommandLine:
         bad = write_map(tmp_path / "bad.csv", ["x,69"])
         proc = run_cli("check", pair[1], bad, cwd=tmp_path)
         assert proc.returncode == 2 and proc.stderr.startswith("Detector check failed:")
+
+
+# --------------------------------------------------------------------------- suspect pitches
+
+
+class TestPitchFlags:
+    def flags(self, ref, ren, **kwargs):
+        return compare.compare(as_data(ref), as_data(ren), **kwargs)["events"]
+
+    def test_octave_leap_is_flagged_on_its_side(self):
+        ref = melody([69, 81, 69])
+        ren = melody([69, 81.1, 69])
+        rows = self.flags(ref, ren)
+        flags = rows[1]["pitch_flags"]
+        assert {f["kind"] for f in flags} == {"octave_leap"}
+        assert {f["side"] for f in flags} == {"reference", "render"}
+        assert flags[0]["evidence"]["neighbours"] == [69, 69]
+        assert rows[1]["review"] is True and rows[0]["pitch_flags"] == []
+        assert "possible octave error" in rows[1]["reasons"][-1]
+
+    def test_ordinary_leap_is_not_flagged(self):
+        assert self.flags(melody([69, 76, 69]), melody([69, 76, 69]))[1]["pitch_flags"] == []
+
+    def test_octave_counterpart(self):
+        ref = melody([60, 62, 64])
+        ren = melody([60, 74, 64])
+        rows = self.flags(ref, ren)
+        flagged = [r for r in rows if r["pitch_flags"]]
+        assert {r["status"] for r in flagged} == {"unmatched reference event", "extra render event"}
+        kinds = [f["kind"] for r in flagged for f in r["pitch_flags"]]
+        assert kinds == ["octave_counterpart", "octave_counterpart"]
+        assert flagged[0]["pitch_flags"][0]["evidence"]["cents"] == pytest.approx(1200)
+
+    def test_octave_from_written_note(self):
+        notes = melody([60, 74])
+        events = [written(0, 60), written(.3, 62)]
+        rows = self.flags(notes, notes, event_map=events)
+        (flag,) = [f for f in rows[1]["pitch_flags"] if f["kind"] == "octave_written"]
+        assert flag["side"] == "render" and flag["evidence"]["cents"] == pytest.approx(1200)
+
+    def test_instrument_range(self):
+        rows = self.flags(melody([59, 60, 99]), melody([60, 60, 99]), instrument_range=[60., 98.])
+        assert [f["side"] for f in rows[0]["pitch_flags"]] == ["reference"]
+        assert rows[0]["pitch_flags"][0]["evidence"]["cents_outside"] == pytest.approx(100)
+        assert {f["kind"] for f in rows[2]["pitch_flags"]} == {"instrument_range", "tracker_limit"}
+        assert rows[1]["pitch_flags"] == []
+        assert len(rows) == 3  # flags never remove notes
+
+    def test_tracker_limit(self):
+        rows = self.flags(melody([47.5]), melody([47.5]))
+        assert [f["kind"] for f in rows[0]["pitch_flags"]] == ["tracker_limit"] * 2
+
+
+class TestMidiFilters:
+    def test_filters_are_explicit_and_reported(self, tmp_path):
+        notes = [vars(note(0, .5, 69., confidence=.95)), vars(note(.5, 1., 71., confidence=.7)),
+                 vars(note(1., 1.5, 100., confidence=.95))]
+        info = compare.write_midi(tmp_path / "n.mid", notes, 0., min_confidence=.8,
+                                  instrument_range=[60., 98.])
+        (track,) = pretty_midi.PrettyMIDI(str(tmp_path / "n.mid")).instruments
+        assert [n.pitch for n in track.notes] == [69]
+        assert (info["written"], info["detected"]) == (1, 3)
+        assert [e["note"] for e in info["excluded"]] == [1, 2]
+        assert info["excluded"][0]["reason"] == "confidence 0.70 below 0.80"
+        assert "outside the instrument range" in info["excluded"][1]["reason"]
+
+    def test_no_filters_writes_everything(self, tmp_path):
+        notes = [vars(note(0, .5, 69., confidence=.5))]
+        info = compare.write_midi(tmp_path / "n.mid", notes, 0.)
+        assert info["excluded"] == [] and info["written"] == 1
+
+    def test_cli_reports_filters(self, pair, tmp_path):
+        proc = run_cli(*pair, "--midi", "--instrument-range", "A4", "D5", "--midi-skip-out-of-range",
+                       "--no-listening-copy", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        folder = (tmp_path / proc.stdout.strip()).parent
+        result = json.loads((folder / "comparison.json").read_text(encoding="utf-8"))
+        assert result["midi"]["written"] == 2
+        assert [round(e["pitch"]) for e in result["midi"]["excluded"]] == [76]
+        assert result["instrument_range"] == [69, 74]
+        assert result["events"][2]["pitch_flags"][0]["kind"] == "instrument_range"
+        text = (folder / "comparison.md").read_text(encoding="utf-8")
+        assert "reference-notes.mid (2 of 3 detected notes; 1 excluded" in text
+        assert "Instrument range: A4 +0¢–D5 +0¢" in text
+
+    @pytest.mark.parametrize("args, message", [
+        (["--instrument-range", "A4", "zz"], "--instrument-range needs two pitches"),
+        (["--instrument-range", "D5", "A4"], "LOW must be below HIGH"),
+        (["--midi-skip-out-of-range"], "needs --instrument-range"),
+        (["--midi-min-confidence", 2], "between 0 and 1"),
+        (["--midi", "--midi-min-confidence", 1], "excluded every note"),
+    ])
+    def test_bad_arguments_exit_2(self, pair, tmp_path, args, message):
+        proc = run_cli(*pair, *args, cwd=tmp_path)
+        assert proc.returncode == 2 and message in proc.stderr
+        assert not (tmp_path / "outputs").exists()

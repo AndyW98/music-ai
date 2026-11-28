@@ -19,7 +19,7 @@ Input files are only ever opened for reading. Every output is a new file.
 
 import argparse
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -35,7 +35,7 @@ import soundfile
 
 # Bump when ``read_audio``, ``track``, ``segment`` or the cached data changes,
 # so that stale cache entries are never reused.
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v3"
 
 # mir_eval note matching: onsets within 50 ms and pitch within 50 cents count
 # as the same note. The offset score also needs the note end within 20% of the
@@ -72,6 +72,8 @@ class Note:
     ``pitch`` is a fractional MIDI number relative to A440, so 69.25 is A4
     25 cents sharp. ``confidence`` is the median per-frame tracker confidence
     (0-1) and ``rms`` is the note's RMS level in full-scale units.
+    ``start_reason`` says why the note begins (see ``segment``) and ``gaps``
+    lists bridged unpitched gaps as ``[start_s, end_s]``.
     """
 
     start: float
@@ -79,6 +81,8 @@ class Note:
     pitch: float
     confidence: float
     rms: float
+    start_reason: str = "first pitched frame"
+    gaps: list = field(default_factory=list)
 
 
 def read_audio(path):
@@ -149,27 +153,119 @@ def track(mono, rate, start, stop):
     return frames, hop / rate
 
 
-def segment(frames, hop, stop):
+# Segmentation (see ``segment``).
+SPLIT_CENTS = 65.
+MIN_NOTE_S = .055
+MAX_BRIDGE_FRAMES = 3
+REATTACK_DB = 6.
+REATTACK_CONFIDENCE = .85
+
+
+def reattacks(group):
+    """Indices in ``group`` where a stable note is played again.
+
+    A reattack is a local minimum of frame RMS that is at least 6 dB below
+    the loudest frame of the previous 100 ms and at least 6 dB below the
+    loudest of the next 50 ms, while the tone stays clearly pitched
+    (confidence 0.85 or more). Breath and noise lower the confidence, and
+    vibrato or a slow swell does not dip that far, so neither splits a note.
+    Returns ``(index, dip_db, rise_db)`` tuples, at least 55 ms apart.
+    """
+    rms = np.array([f[3] for f in group])
+    found, last = [], 0
+    edge = int(np.ceil(MIN_NOTE_S / .01))
+    for k in range(edge, len(group) - edge + 1):
+        if group[k][1] is None or group[k][2] < REATTACK_CONFIDENCE or k - last < edge:
+            continue
+        if not (rms[k] <= rms[k - 1] and rms[k] <= rms[k + 1]) or rms[k] <= 0:
+            continue
+        dip = 20 * np.log10(rms[max(0, k - 10):k].max() / rms[k])
+        rise = 20 * np.log10(rms[k + 1:k + 6].max() / rms[k])
+        if dip >= REATTACK_DB and rise >= REATTACK_DB:
+            found.append((k, float(dip), float(rise)))
+            last = k
+    return found
+
+
+def segment(frames, hop, stop, candidates=None):
     """Group pitched frames into ``Note`` objects.
 
     A note ends at an unpitched frame or when the pitch moves more than 65
-    cents from the median of the previous five frames. Notes shorter than
-    55 ms are dropped. ``stop`` closes any note still open at the range end.
+    cents from the median of the previous five frames, with two refinements
+    that weigh pitch stability and attack evidence together:
+
+    - A gap of up to three unpitched frames (30 ms) whose frames are audible
+      but not periodic, such as a breath or a tracker dropout, is bridged when
+      the pitch on both sides agrees within 65 cents. Silent frames (below
+      the tracker's level gate) always end the note.
+    - A stable note is split where ``reattacks`` finds a new attack, such as a
+      slurred repeated note.
+
+    Notes shorter than 55 ms are dropped; if ``candidates`` is a list, each
+    dropped fragment is appended to it with the reason. ``stop`` closes any
+    note still open at the range end.
     """
+    def end_of(index):
+        return frames[index + 1][0] if index + 1 < len(frames) else stop
+
+    # Pass 1: runs of pitched frames, split at unpitched frames and pitch jumps.
+    runs, current, reason = [], [], "first pitched frame"
+    for index, frame in enumerate(frames):
+        pitch = frame[1]
+        if pitch is None:
+            if current:
+                runs.append((current, reason))
+                current = []
+            reason = "first pitched frame"
+            continue
+        if current:
+            recent = np.median([frames[k][1] for k in current[-5:]])
+            if abs(pitch - recent) * 100 > SPLIT_CENTS:
+                runs.append((current, reason))
+                current, reason = [], f"pitch change of {(pitch - recent) * 100:+.0f} cents"
+        current.append(index)
+    if current:
+        runs.append((current, reason))
+
+    # Pass 2: bridge short, audible unpitched gaps at the same pitch.
+    merged = []
+    for run, reason in runs:
+        if merged:
+            previous = merged[-1]
+            gap = range(previous["frames"][-1] + 1, run[0])
+            same = abs(np.median([frames[k][1] for k in run[:5]]) -
+                       np.median([frames[k][1] for k in previous["frames"][-5:]])) * 100 <= SPLIT_CENTS
+            if 0 < len(gap) <= MAX_BRIDGE_FRAMES and same and all(frames[k][2] > 0 for k in gap):
+                previous["frames"] += [*gap, *run]
+                previous["gaps"].append([frames[gap[0]][0], frames[run[0]][0]])
+                continue
+        merged.append({"frames": list(run), "reason": reason, "gaps": []})
+
+    # Pass 3: split at reattacks, then build notes.
     notes = []
-    group = []
-    # The sentinel frame at ``stop`` flushes the final group.
-    for frame in [*frames, [stop, None, 0., 0.]]:
-        time, pitch, _, _ = frame
-        if group and (pitch is None or abs(pitch - np.median([f[1] for f in group[-5:]])) > .65):
-            if len(group) * hop >= .055:
-                values = np.asarray(group)
-                _, pitches, confidence, rms = values.T
-                notes.append(Note(group[0][0], time, float(np.median(pitches)),
-                                  float(np.median(confidence)), float(np.sqrt(np.mean(rms**2)))))
-            group = []
-        if pitch is not None:
-            group.append(frame)
+
+    def close(indices, reason, gaps):
+        pitched = [frames[k] for k in indices if frames[k][1] is not None]
+        start, end = frames[indices[0]][0], end_of(indices[-1])
+        values = np.asarray([f[1:] for f in pitched], dtype=float)
+        pitch = float(np.median(values[:, 0]))
+        if len(indices) * hop < MIN_NOTE_S - 1e-9:
+            if candidates is not None:
+                candidates.append({"start": start, "end": end, "pitch": pitch,
+                                   "confidence": float(np.median(values[:, 1])),
+                                   "reason": f"shorter than {MIN_NOTE_S * 1000:.0f} ms"})
+            return
+        notes.append(Note(start, end, pitch, float(np.median(values[:, 1])),
+                          float(np.sqrt(np.mean(values[:, 2]**2))), reason,
+                          [g for g in gaps if start <= g[0] < end]))
+
+    for piece in merged:
+        indices, reason = piece["frames"], piece["reason"]
+        first = 0
+        for k, dip, rise in reattacks([frames[i] for i in indices]):
+            close(indices[first:k], reason, piece["gaps"])
+            first, reason = k, f"reattack: level dipped {dip:.1f} dB and rose {rise:.1f} dB"
+        close(indices[first:], reason, piece["gaps"])
     return notes
 
 
@@ -201,12 +297,13 @@ def analyze(path, start, end, cache):
     clip = samples[round(start * rate):round(stop * rate)]
     mono = samples if samples.ndim == 1 else samples.mean(axis=1)
     frames, hop = track(mono, rate, start, stop)
-    notes = segment(frames, hop, stop)
+    candidates = []
+    notes = segment(frames, hop, stop, candidates)
     if not notes:
         raise ValueError(f"No stable solo notes detected in {path.name}")
     data = {"range": [start, stop], "peak": float(np.max(np.abs(clip))),
             "rms": float(np.sqrt(np.mean(clip**2))), "frames": frames,
-            "notes": [asdict(note) for note in notes]}
+            "notes": [asdict(note) for note in notes], "candidates": candidates}
     cache.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(data, allow_nan=False)
     try:
@@ -266,7 +363,7 @@ def side_fields(prefix, note, index):
             f"{prefix}_confidence": note.confidence if note else None}
 
 
-def compare(reference, rendered, event_map=None):
+def compare(reference, rendered, event_map=None, instrument_range=None):
     """Measure render-minus-reference differences for every aligned pair.
 
     Timing is made relative to the first matched pair whose pitches agree
@@ -277,7 +374,9 @@ def compare(reference, rendered, event_map=None):
     detected start, end, pitch and confidence on both sides, the index of each
     note in the analysis' ``notes`` list, and ``reasons`` explaining any review
     flag. With ``event_map`` (from ``read_event_map``), rows also say which
-    written event they correspond to; see ``trace``.
+    written event they correspond to; see ``trace``. ``flag_pitches`` adds
+    ``pitch_flags`` for likely octave errors and, with ``instrument_range``
+    (low and high MIDI pitch), out-of-range notes. Flags never remove notes.
     """
     original, render = ([Note(**item) for item in x["notes"]] for x in (reference, rendered))
     pairs = align(original, render)
@@ -321,6 +420,7 @@ def compare(reference, rendered, event_map=None):
         rows.append(row)
     result = {"render_minus_reference_offset_s": shift, "render_gain_for_rms_match_db": gain,
               "note_match": note_scores(original, render, shift or 0.)}
+    matches = None
     if event_map is not None:
         matches = match_written(render, event_map)
         rows = trace(rows, event_map, matches, shift)
@@ -329,10 +429,119 @@ def compare(reference, rendered, event_map=None):
         row["id"] = number
         row.setdefault("written", None)
         row.setdefault("written_status", "no event map")
+    flag_pitches(rows, {"reference": original, "render": render}, event_map, matches,
+                 instrument_range)
+    for row in rows:
         if row["status"] == "matched":
             row["review"] = bool(row["reasons"])
     result["events"] = rows
     return result
+
+
+# Suspect pitches (see ``flag_pitches``): an interval counts as an octave
+# when it is within 50 cents of 12 or 24 semitones, and an unmatched pair or
+# written event is "at the same place" within 100 ms. The tracker searches
+# about 120-2400 Hz; notes within a semitone of either end are flagged.
+OCTAVE_TOLERANCE_CENTS = 50.
+OCTAVE_PLACE_S = .1
+TRACKER_LOW, TRACKER_HIGH = 69 + 12 * np.log2(120 / 440), 69 + 12 * np.log2(2400 / 440)
+
+
+def octaves(cents):
+    """Whole octaves (1 or 2) that ``cents`` is close to, or 0."""
+    for count in (1, 2):
+        if abs(abs(cents) - 1200 * count) <= OCTAVE_TOLERANCE_CENTS:
+            return count
+    return 0
+
+
+def flag_pitches(rows, notes, events=None, matches=None, instrument_range=None):
+    """Add ``pitch_flags`` (and matching ``reasons``) to rows with suspect pitches.
+
+    Each flag is ``{"kind", "side", "reason", "evidence"}``. Kinds:
+
+    - ``octave_leap``: the note is an octave (or two) away from both
+      neighbours on its side, in the same direction.
+    - ``octave_counterpart``: an unmatched reference event and an extra render
+      event next to each other in the alignment, at the same place, an octave
+      apart.
+    - ``octave_written``: with an event map, a render detection (or an
+      undetected reference note's expected position) has no written event at
+      its pitch but one an octave away at the same place.
+    - ``instrument_range``: outside ``instrument_range`` by more than 50 cents.
+    - ``tracker_limit``: within a semitone of the tracker's 120-2400 Hz range,
+      where octave errors are more likely.
+
+    The caller marks matched rows with a flag as ``review``. Notes are never
+    removed.
+    """
+    def add(row, kind, side, reason, **evidence):
+        row.setdefault("pitch_flags", []).append(
+            {"kind": kind, "side": side, "reason": reason, "evidence": evidence})
+        row["reasons"].append(reason)
+
+    for row in rows:
+        row.setdefault("pitch_flags", [])
+        for side in ("reference", "render"):
+            index = row[f"{side}_note"]
+            if index is None:
+                continue
+            pitch, sequence = row[f"{side}_pitch"], notes[side]
+            if 0 < index < len(sequence) - 1:
+                before = (pitch - sequence[index - 1].pitch) * 100
+                after = (pitch - sequence[index + 1].pitch) * 100
+                if octaves(before) and octaves(after) and np.sign(before) == np.sign(after):
+                    add(row, "octave_leap", side,
+                        f"{side} note is {before:+.0f} and {after:+.0f} cents from its neighbours "
+                        "(possible octave error)",
+                        pitch=pitch, neighbours=[sequence[index - 1].pitch, sequence[index + 1].pitch])
+            if instrument_range:
+                low, high = instrument_range
+                outside = (low - pitch) * 100 if pitch < low else (pitch - high) * 100
+                if outside > OCTAVE_TOLERANCE_CENTS:
+                    add(row, "instrument_range", side,
+                        f"{side} note {note_label(pitch)} is {outside:.0f} cents outside the "
+                        f"instrument range {note_label(low)}–{note_label(high)}",
+                        pitch=pitch, range=[low, high], cents_outside=outside)
+            if pitch - TRACKER_LOW < 1 or TRACKER_HIGH - pitch < 1:
+                add(row, "tracker_limit", side,
+                    f"{side} note {note_label(pitch)} is near the tracker's 120–2400 Hz limit",
+                    pitch=pitch, limits_hz=[120, 2400])
+    for first, second in zip(rows, rows[1:]):
+        pair = {r["status"]: r for r in (first, second)}
+        missing, extra = pair.get("unmatched reference event"), pair.get("extra render event")
+        if not (missing and extra):
+            continue
+        cents = (extra["render_pitch"] - missing["reference_pitch"]) * 100
+        place = missing.get("expected_render_s")
+        if place is None:
+            matched = [r for r in rows[:rows.index(first)] if r["status"] == "matched"]
+            place = missing["reference_s"] + (
+                matched[-1]["render_s"] - matched[-1]["reference_s"] if matched else 0.)
+        if octaves(cents) and abs(extra["render_s"] - place) <= OCTAVE_PLACE_S:
+            for row, other, side in ((missing, extra, "reference"), (extra, missing, "render")):
+                add(row, "octave_counterpart", side,
+                    f"event {other['id']} on the other side is "
+                    f"{cents:+.0f} cents away at the same place (possible octave error)",
+                    cents=cents, other_reference_s=other["reference_s"], other_render_s=other["render_s"])
+    if events:
+        for row in rows:
+            if row["written"] is not None:
+                continue
+            side = "render" if row["render_s"] is not None else "reference"
+            place = row["render_s"] if side == "render" else row.get("expected_render_s")
+            pitch = row[f"{side}_pitch"]
+            if place is None or pitch is None:
+                continue
+            near = [e for e in events if abs(e["time_s"] - place) <= OCTAVE_PLACE_S
+                    and octaves((pitch - e["pitch"]) * 100)]
+            if near:
+                event = min(near, key=lambda e: abs(e["time_s"] - place))
+                cents = (pitch - event["pitch"]) * 100
+                add(row, "octave_written", side,
+                    f"{side} note is {cents:+.0f} cents from the written {note_label(event['pitch'])} "
+                    f"at {location(event)} (possible octave error)",
+                    cents=cents, written=dict(event))
 
 
 # --------------------------------------------------------------------------- event maps
@@ -741,7 +950,27 @@ def write_excerpts(folder, rows, ids, paths, ranges, gain, shift):
         row["excerpt"] = info
 
 
-def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM):
+def midi_selection(notes, min_confidence=None, instrument_range=None):
+    """Split notes into ``(kept, excluded)`` for ``write_midi``'s filters."""
+    kept, excluded = [], []
+    for index, n in enumerate(notes):
+        reason = None
+        if min_confidence is not None and n["confidence"] < min_confidence:
+            reason = f"confidence {n['confidence']:.2f} below {min_confidence:.2f}"
+        elif instrument_range and not (instrument_range[0] - .5 <= n["pitch"] <= instrument_range[1] + .5):
+            reason = f"{note_label(n['pitch'])} outside the instrument range"
+        if reason:
+            excluded.append({"note": index, "start": n["start"], "pitch": n["pitch"],
+                             "confidence": n["confidence"], "reason": reason})
+        else:
+            kept.append(n)
+    if not kept:
+        raise ValueError("--midi filters excluded every note")
+    return kept, excluded
+
+
+def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM, min_confidence=None,
+               instrument_range=None):
     """Write detected notes as a single-track MIDI file for importing into Dorico.
 
     Times are seconds from the start of the selected range at the MIDI default
@@ -749,11 +978,20 @@ def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM):
     program. Pitches are rounded to the nearest semitone (the exact cents are
     in comparison.json). Velocity follows each note's level relative to the
     loudest note: 100 at the loudest, 2 velocity steps per dB, minimum 20.
+
+    Every detected note is written unless a filter is given: notes below
+    ``min_confidence``, or more than 50 cents outside ``instrument_range``
+    (low and high MIDI pitch), are left out. Returns what was written and
+    every excluded note with its reason, for the report.
     """
-    loudest = max(n["rms"] for n in notes)
+    kept, excluded = midi_selection(notes, min_confidence, instrument_range)
+    info = {"file": Path(path).name, "written": len(kept), "detected": len(notes),
+            "filters": {"min_confidence": min_confidence, "instrument_range": instrument_range},
+            "excluded": excluded}
+    loudest = max(n["rms"] for n in kept)
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=program)
-    for n in notes:
+    for n in kept:
         db = 20 * np.log10(max(n["rms"], 1e-12) / loudest)
         velocity = int(np.clip(round(100 + 2 * db), 20, 127))
         instrument.notes.append(pretty_midi.Note(
@@ -761,6 +999,7 @@ def write_midi(path, notes, range_start, program=DEFAULT_MIDI_PROGRAM):
             start=max(0., n["start"] - range_start), end=max(0., n["end"] - range_start)))
     midi.instruments.append(instrument)
     midi.write(str(path))
+    return info
 
 
 def priority(row):
@@ -898,8 +1137,22 @@ def markdown(result, limit):
         lines.append(f"- Listening copies: {', '.join(copies['files'])} "
                      f"(render gain {copies['gain_db']:+.1f} dB by {copies['method']}, "
                      f"peak {copies['matched_peak']:.2f})")
-    if result.get("midi"):
-        lines.append(f"- Reference notes as MIDI: {result['midi']}")
+    midi = result.get("midi")
+    if midi:
+        excluded = (f"; {len(midi['excluded'])} excluded by the MIDI filters, see the JSON"
+                    if midi["excluded"] else "; no filters" if not any(midi["filters"].values())
+                    else "; none excluded")
+        lines.append(f"- Reference notes as MIDI: {midi['file']} ({midi['written']} of "
+                     f"{midi['detected']} detected notes{excluded})")
+    for label in ("reference", "render"):
+        count = len(result.get(label, {}).get("candidates", []))
+        if count:
+            lines.append(f"- {label.capitalize()}: {count} fragment(s) shorter than "
+                         f"{MIN_NOTE_S * 1000:.0f} ms kept as candidates, not notes (see the JSON)")
+    if result.get("instrument_range"):
+        low, high = result["instrument_range"]
+        lines.append(f"- Instrument range: {note_label(low)}–{note_label(high)} "
+                     "(flags only; no notes are removed)")
     if mapped:
         event_map = result["event_map"]
         lines.append(f"- Event map: {event_map['file']} ({len(event_map['events'])} written events, "
@@ -974,7 +1227,8 @@ def check_main(argv):
         events = read_event_map(args.event_map, args.event_map_offset)
         data, _ = analyze(args.render, args.render_start, args.render_end, args.cache)
         notes = [Note(**item) for item in data["notes"]]
-        result = {"render": {"file": args.render.name, **{k: data[k] for k in ("range", "notes")}},
+        result = {"render": {"file": args.render.name,
+                             **{k: data[k] for k in ("range", "notes", "candidates")}},
                   "event_map": {"file": args.event_map.name, "offset_s": args.event_map_offset,
                                 "events": events},
                   "detector_check": check_detector(notes, events, match_written(notes, events))}
@@ -1021,6 +1275,13 @@ def main(argv=None):
                         help="also write the reference's detected notes as reference-notes.mid")
     parser.add_argument("--midi-program", type=int, default=DEFAULT_MIDI_PROGRAM,
                         help="General MIDI program for --midi, 0-127 (default: 73, Flute)")
+    parser.add_argument("--midi-min-confidence", type=float,
+                        help="leave notes below this tracker confidence (0-1) out of the MIDI file")
+    parser.add_argument("--midi-skip-out-of-range", action="store_true",
+                        help="leave notes outside --instrument-range out of the MIDI file")
+    parser.add_argument("--instrument-range", nargs=2, metavar=("LOW", "HIGH"),
+                        help="lowest and highest pitch (e.g. C4 D7 or 60 98); notes outside "
+                             "are flagged for review, never removed")
     args = parser.parse_args(argv)
     try:
         check_ranges((args.reference_start, args.reference_end), (args.render_start, args.render_end))
@@ -1030,13 +1291,31 @@ def main(argv=None):
             raise ValueError("--midi-program must be between 0 and 127")
         if not np.isfinite(args.event_map_offset):
             raise ValueError("--event-map-offset must be a finite number of seconds")
+        instrument_range = None
+        if args.instrument_range:
+            try:
+                instrument_range = [parse_pitch(value) for value in args.instrument_range]
+            except ValueError:
+                raise ValueError("--instrument-range needs two pitches such as C4 D7") from None
+            if not instrument_range[0] < instrument_range[1]:
+                raise ValueError("--instrument-range LOW must be below HIGH")
+        if args.midi_min_confidence is not None and not 0 <= args.midi_min_confidence <= 1:
+            raise ValueError("--midi-min-confidence must be between 0 and 1")
+        if args.midi_skip_out_of_range and not instrument_range:
+            raise ValueError("--midi-skip-out-of-range needs --instrument-range")
         events = read_event_map(args.event_map, args.event_map_offset) if args.event_map else None
         reference, hit = analyze(args.reference, args.reference_start, args.reference_end, args.cache)
         rendered, _ = analyze(args.render, args.render_start, args.render_end, args.cache)
-        result = compare(reference, rendered, events)
+        if args.midi:
+            # Check the filters before any output folder exists.
+            midi_selection(reference["notes"], args.midi_min_confidence,
+                           instrument_range if args.midi_skip_out_of_range else None)
+        result = compare(reference, rendered, events, instrument_range)
+        result["instrument_range"] = instrument_range
         result["reference_cache_hit"] = hit
         for label, path, data in (("reference", args.reference, reference), ("render", args.render, rendered)):
-            result[label] = {"file": path.name, **{k: data[k] for k in ("range", "peak", "rms", "notes")}}
+            result[label] = {"file": path.name, **{k: data[k] for k in ("range", "peak", "rms", "notes")},
+                             "candidates": data["candidates"]}
         if events is not None:
             result["event_map"] = {"file": args.event_map.name, "offset_s": args.event_map_offset,
                                    "events": events}
@@ -1054,9 +1333,10 @@ def main(argv=None):
                            {"reference": reference["range"], "render": rendered["range"]},
                            gain, result["render_minus_reference_offset_s"])
         if args.midi:
-            write_midi(folder / "reference-notes.mid", reference["notes"], reference["range"][0],
-                       args.midi_program)
-            result["midi"] = "reference-notes.mid"
+            result["midi"] = write_midi(
+                folder / "reference-notes.mid", reference["notes"], reference["range"][0],
+                args.midi_program, args.midi_min_confidence,
+                instrument_range if args.midi_skip_out_of_range else None)
         (folder / "comparison.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
         (folder / "comparison.md").write_text(markdown(result, args.limit), encoding="utf-8")
         print(folder / "comparison.md")

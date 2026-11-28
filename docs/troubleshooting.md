@@ -20,6 +20,11 @@ All errors start with `Comparison failed:` (`Detector check failed:` for
 | `No note events in event map <file>` | The CSV has no rows, or the MIDI file has only drum tracks. |
 | `Cannot read MIDI event map <file>: …` | The file is not a readable MIDI file. Export it from Dorico again. |
 | `--event-map-offset must be a finite number of seconds` | Use a number such as `0.5` or `-0.25`. |
+| `--instrument-range needs two pitches such as C4 D7` | Give the lowest and highest pitch as note names or MIDI numbers. |
+| `--instrument-range LOW must be below HIGH` | Put the lowest pitch first. |
+| `--midi-skip-out-of-range needs --instrument-range` | Add `--instrument-range`, or drop the option. |
+| `--midi-min-confidence must be between 0 and 1` | Use a value such as `0.85`. |
+| `--midi filters excluded every note` | Lower `--midi-min-confidence`, or widen `--instrument-range`. |
 | File or permission errors | Check the path. In PowerShell, put quotes around paths that contain spaces. |
 
 Supported formats are those libsndfile reads, including WAV, FLAC and OGG
@@ -37,8 +42,15 @@ at written pitch), or the tracker may have picked the wrong octave on a very
 low or very high note. The tracker covers about 120–2400 Hz.
 
 **Repeated notes are merged or flagged for review.**
-Legato repeated notes at the same pitch can merge into one long note. Look at
-the attacks in `comparison.json` and listen to that passage.
+A slurred repeated note is split only when its level dips by 6 dB or more
+while the pitch stays clear. A very smooth reattack can still merge into one
+long note. Look at each note's `start_reason` in `comparison.json` and
+listen to that passage.
+
+**A note an octave off is flagged.**
+Check the `pitch_flags` evidence and listen. The tracker sometimes locks onto
+the octave above or below, especially near its 120–2400 Hz limits. Pass
+`--instrument-range` so notes the instrument cannot play are flagged as well.
 
 **Breath noise, ornaments or long reverb tails.**
 These can split or extend notes. Trim the range, or treat duration values near

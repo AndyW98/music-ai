@@ -20,8 +20,11 @@ Windows and Linux, with Python 3.12 and 3.14.
 |---|---|
 | `read_audio` | 8-bit, 16-bit, 32-bit integer and float WAV scaling; FLAC and OGG input; stereo shape; empty, NaN, infinite and unreadable audio rejected |
 | `track` | Pure tones from 131 Hz to 1760 Hz within 2 cents; a quarter-tone-sharp harmonic tone; frame timing; quiet frames unpitched; silent and too-short ranges rejected |
-| `segment` | Splitting on pitch changes and gaps; dropping notes under 55 ms; vibrato kept as one note; median and RMS values |
-| `analyze` | Sample notes detected; OGG input; cache hit, renamed-copy hit, range, content and cache-version misses; corrupt cache recovery; input file unchanged; range clamping; stereo; all sample formats; no-notes error |
+| `segment` | Splitting on pitch changes and silent gaps; short audible gaps bridged, long or pitch-changing ones not; reattack splits, and no split for low confidence, shallow dips, note edges or vibrato with tremolo; start reasons; short fragments kept as candidates; median and RMS values |
+| Boundary regressions | Synthetic audio for a slurred repeated note (split), a breath dropout (bridged) and a short silence (split) |
+| Suspect pitches | Octave leaps, octave counterparts, octaves from the written note, instrument range and tracker limits; ordinary leaps not flagged; flags never remove notes |
+| MIDI filters | Confidence and range filters with each excluded note reported; no filters by default; command-line report; every filter argument error |
+| `analyze` | Sample notes detected; short candidates kept; OGG input; cache hit, renamed-copy hit, range, content and cache-version misses; corrupt cache recovery; input file unchanged; range clamping; stereo; all sample formats; no-notes error |
 | `align` | Identical, extra, missing and substituted notes; empty render |
 | `compare` | Offset, cents, attack, duration and RMS-adjusted level; unmatched and extra events; no-anchor case; every review-flag rule; mir_eval note match scores |
 | `listening_copies` | LUFS match within 0.1 LU; clip covers the selected range; RMS fallback for short clips; float output; inputs unchanged |
